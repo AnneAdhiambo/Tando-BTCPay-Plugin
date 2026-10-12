@@ -186,6 +186,13 @@ public class TandoSplitGetAndSettleTests : PlaywrightBaseTest
     private async Task EnsureStoreWallet(BTCPayServerClient client, string storeId)
     {
         if (_storesWithWallet.Add(storeId))
+        {
             await client.GenerateOnChainWallet(storeId, "BTC-CHAIN", new GenerateOnChainWalletRequest());
+            await client.UpdateStoreRateConfiguration(storeId, new StoreRateConfiguration
+            {
+                IsCustomScript = true,
+                EffectiveScript = "BTC_KES = 10000000;"
+            });
+        }
     }
 }
