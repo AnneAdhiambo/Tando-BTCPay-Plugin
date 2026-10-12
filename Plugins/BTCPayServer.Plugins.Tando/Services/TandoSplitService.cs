@@ -13,6 +13,7 @@ using BTCPayServer.Services.Stores;
 using NBitpayClient;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Converters;
+using Newtonsoft.Json.Linq;
 
 namespace BTCPayServer.Plugins.Tando.Services;
 
@@ -256,5 +257,7 @@ public class TandoSplitService(InvoiceRepository invoiceRepository, TandoSubscri
         return record;
     }
 
-    private static TandoSplitRecord? GetRecord(InvoiceEntity invoice) => invoice.Metadata?.GetAdditionalData<TandoSplitRecord>(SplitMetadataKey);
+    private static TandoSplitRecord? GetRecord(InvoiceEntity invoice) =>
+        invoice.Metadata?.AdditionalData is { } data && data.TryGetValue(SplitMetadataKey, out var token)
+        && token.Type == JTokenType.Object ? token.ToObject<TandoSplitRecord>() : null;
 }
