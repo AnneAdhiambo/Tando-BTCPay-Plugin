@@ -37,6 +37,9 @@ public class TandoSplitController(TandoSplitService splitService) : Controller
         if (error == "invoice_not_settled")
             return BadRequest(new { error, message = "Only a settled invoice can be split." });
 
+        if (error == "treasury_not_configured")
+            return BadRequest(new { error, message = "Split payments aren't available until the Tando team sets a treasury Lightning address." });
+
         if (error is not null)
             return NotFound(new { error });
 

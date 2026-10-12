@@ -28,7 +28,7 @@ public class TandoSplitTests : PlaywrightBaseTest
 
     public ServerTester ServerTester { get; }
 
-    private async Task EnsureTandoSubscriptionConfigured(TestAccount admin)
+    private async Task EnsureTandoSubscriptionConfigured(TestAccount admin, string treasuryLightningAddress = "treasury@tando.example")
     {
         var client = await admin.CreateClient();
         var offering = await client.CreateOffering(admin.StoreId, new OfferingModel { AppName = "Tando Test Offering" });
@@ -37,7 +37,8 @@ public class TandoSplitTests : PlaywrightBaseTest
         await subscriptionService.SaveSettings(new TandoSettings
         {
             SubscriptionOfferingId = offering.Id,
-            SubscriptionPlanId = plan.Id
+            SubscriptionPlanId = plan.Id,
+            TreasuryLightningAddress = treasuryLightningAddress
         });
     }
 
@@ -320,7 +321,28 @@ public class TandoSplitTests : PlaywrightBaseTest
         Assert.Equal(recordedAt, after.GetProperty("recordedAt").GetString());
     }
 
+    [Fact]
+    public async Task ComputeSplit_WhenTreasuryRemovedAfterConfiguring_IsRefused()
+    {
+        await InitializePlaywright(ServerTester);
+        var admin = await NewAdminAccount();
+        await EnsureTandoSubscriptionConfigured(admin);
+        var adminKey = await MintApiKey(admin);
+        var api = await ApiContextFor(adminKey);
 
+        var (storeId, merchantApi) = await SignupMerchant(api);
+        await EnableSplit(merchantApi, storeId, 50m);
+        var subscriptionService = ServerTester.PayTester.GetService<TandoSubscriptionService>();
+        var settings = await subscriptionService.GetSettings();
+        settings.TreasuryLightningAddress = null;
+        await subscriptionService.SaveSettings(settings);
+
+        var invoiceId = await CreateSettledInvoice(admin, storeId, 1000m);
+        var compute = await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
+        Assert.Equal(400, compute.Status);
+        Assert.Equal("treasury_not_configured", (await ParseJson(compute)).GetProperty("error").GetString());
+        Assert.Empty(await MerchantClient(storeId).GetPullPayments(storeId));
+    }
 
     private readonly HashSet<string> _storesWithWallet = new();
     private async Task EnsureStoreWallet(BTCPayServerClient client, string storeId)
