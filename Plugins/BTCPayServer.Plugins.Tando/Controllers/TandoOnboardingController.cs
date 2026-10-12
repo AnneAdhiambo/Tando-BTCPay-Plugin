@@ -123,7 +123,9 @@ public class TandoOnboardingController(StoreRepository storeRepository, TandoSub
             PhoneNumber = normalizedPhone,
             AlreadyExisted = false,
             PosAppId = newPosAppId,
-            CartAppId = newCartAppId
+            CartAppId = newCartAppId,
+            UserId = merchant.Id,
+            ApiKey = await accountService.CreateAppKey(merchant.Id, request.DeviceName)
         });
     }
 
