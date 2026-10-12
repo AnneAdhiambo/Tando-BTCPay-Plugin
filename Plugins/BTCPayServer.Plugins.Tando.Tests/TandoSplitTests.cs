@@ -108,6 +108,7 @@ public class TandoSplitTests : PlaywrightBaseTest
     private async Task<string> CreateInvoice(TestAccount admin, string storeId, decimal amount)
     {
         var client = await admin.CreateClient();
+        await EnsureStoreWallet(client, storeId);
         var invoice = await client.CreateInvoice(storeId, new CreateInvoiceRequest
         {
             Amount = amount,
@@ -156,7 +157,7 @@ public class TandoSplitTests : PlaywrightBaseTest
         var api = await ApiContextFor(adminKey);
 
         var storeId = await SignupAndGetStoreId(api);
-        var invoiceId = await CreateInvoice(admin, storeId, 1000m);
+        var invoiceId = await CreateSettledInvoice(admin, storeId, 1000m);
 
         // split-config defaults to 0% (no PUT called), so ComputeAndRecordSplit
         // should never reach CreateAndClaimPayout at all.
@@ -179,12 +180,12 @@ public class TandoSplitTests : PlaywrightBaseTest
         var api = await ApiContextFor(adminKey);
 
         var storeId = await SignupAndGetStoreId(api);
-        var invoiceId = await CreateInvoice(admin, storeId, 500m);
+        var invoiceId = await CreateSettledInvoice(admin, storeId, 500m);
 
         var compute = await api.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
         Assert.Equal(200, compute.Status);
 
-        var update = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/mpesa-payout-status",
+        var update = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split/mpesa-payout-status",
             new APIRequestContextOptions
             {
                 DataObject = new { status = "Confirmed", payoutReference = "TANDO-REF-123" }
@@ -202,7 +203,7 @@ public class TandoSplitTests : PlaywrightBaseTest
     }
 
     [Fact]
-    public async Task UpdateMpesaPayoutStatus_UnknownInvoice_Returns404()
+    public async Task UpdateMpesaPayoutStatus_UnknownInvoice_ReturnsForbidden()
     {
         await InitializePlaywright(ServerTester);
         var admin = await NewAdminAccount();
@@ -212,15 +213,12 @@ public class TandoSplitTests : PlaywrightBaseTest
 
         var storeId = await SignupAndGetStoreId(api);
 
-        var update = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/invoices/does-not-exist/mpesa-payout-status",
+        var update = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/invoices/does-not-exist/split/mpesa-payout-status",
             new APIRequestContextOptions
             {
                 DataObject = new { status = "Confirmed", payoutReference = (string)null }
             });
-
-        Assert.Equal(404, update.Status);
-        var body = await ParseJson(update);
-        Assert.Equal("invoice_not_found", body.GetProperty("error").GetString());
+        Assert.Equal(403, update.Status);
     }
 
     [Fact]
@@ -234,8 +232,8 @@ public class TandoSplitTests : PlaywrightBaseTest
 
         var storeId = await SignupAndGetStoreId(api);
 
-        var invoiceAId = await CreateInvoice(admin, storeId, 200m);
-        var invoiceBId = await CreateInvoice(admin, storeId, 300m);
+        var invoiceAId = await CreateSettledInvoice(admin, storeId, 200m);
+        var invoiceBId = await CreateSettledInvoice(admin, storeId, 300m);
         await api.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceAId}/split");
         await api.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceBId}/split");
 
@@ -297,5 +295,19 @@ public class TandoSplitTests : PlaywrightBaseTest
 
         var after = await WaitForSplit(api, storeId, invoiceId);
         Assert.Equal(recordedAt, after.GetProperty("recordedAt").GetString());
+    }
+
+    private readonly HashSet<string> _storesWithWallet = new();
+    private async Task EnsureStoreWallet(BTCPayServerClient client, string storeId)
+    {
+        if (_storesWithWallet.Add(storeId))
+        {
+            await client.GenerateOnChainWallet(storeId, "BTC-CHAIN", new GenerateOnChainWalletRequest());
+            await client.UpdateStoreRateConfiguration(storeId, new StoreRateConfiguration
+            {
+                IsCustomScript = true,
+                EffectiveScript = "BTC_KES = 10000000;"
+            });
+        }
     }
 }

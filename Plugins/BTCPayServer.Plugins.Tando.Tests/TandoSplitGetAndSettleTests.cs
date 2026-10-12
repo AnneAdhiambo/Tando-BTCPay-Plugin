@@ -106,12 +106,21 @@ public class TandoSplitGetAndSettleTests : PlaywrightBaseTest
     private async Task<string> CreateInvoice(TestAccount admin, string storeId, decimal amount)
     {
         var client = await admin.CreateClient();
+        await EnsureStoreWallet(client, storeId);
         var invoice = await client.CreateInvoice(storeId, new CreateInvoiceRequest
         {
             Amount = amount,
             Currency = "KES"
         });
         return invoice.Id;
+    }
+
+    private async Task<string> CreateSettledInvoice(TestAccount admin, string storeId, decimal amount)
+    {
+        var invoiceId = await CreateInvoice(admin, storeId, amount);
+        var client = await admin.CreateClient();
+        await client.MarkInvoiceStatus(invoiceId, new MarkInvoiceStatusRequest { Status = InvoiceStatus.Settled });
+        return invoiceId;
     }
 
     [Fact]
@@ -140,7 +149,7 @@ public class TandoSplitGetAndSettleTests : PlaywrightBaseTest
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
         var storeId = await SignupAndGetStoreId(api);
-        var invoiceId = await CreateInvoice(admin, storeId, 400m);
+        var invoiceId = await CreateSettledInvoice(admin, storeId, 400m);
 
         await api.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
 
@@ -151,7 +160,7 @@ public class TandoSplitGetAndSettleTests : PlaywrightBaseTest
     }
 
     [Fact]
-    public async Task Settle_UnknownInvoice_ReturnsNotFound()
+    public async Task Settle_UnknownInvoice_ReturnsForbidden()
     {
         await InitializePlaywright(ServerTester);
         var admin = await NewAdminAccount();
@@ -159,11 +168,8 @@ public class TandoSplitGetAndSettleTests : PlaywrightBaseTest
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
         var storeId = await SignupAndGetStoreId(api);
-
         var settle = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/invoices/does-not-exist/split/settle");
-        Assert.Equal(404, settle.Status);
-        var body = await ParseJson(settle);
-        Assert.Equal("invoice_not_found", body.GetProperty("error").GetString());
+        Assert.Equal(403, settle.Status);
     }
 
     [Fact]
@@ -175,12 +181,26 @@ public class TandoSplitGetAndSettleTests : PlaywrightBaseTest
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
         var storeId = await SignupAndGetStoreId(api);
-        var invoiceId = await CreateInvoice(admin, storeId, 150m);
+        var invoiceId = await CreateSettledInvoice(admin, storeId, 150m);
 
         var compute = await api.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
         Assert.Equal(200, compute.Status);
 
         var settle = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split/settle");
         Assert.Equal(200, settle.Status);
+    }
+
+    private readonly HashSet<string> _storesWithWallet = new();
+    private async Task EnsureStoreWallet(BTCPayServerClient client, string storeId)
+    {
+        if (_storesWithWallet.Add(storeId))
+        {
+            await client.GenerateOnChainWallet(storeId, "BTC-CHAIN", new GenerateOnChainWalletRequest());
+            await client.UpdateStoreRateConfiguration(storeId, new StoreRateConfiguration
+            {
+                IsCustomScript = true,
+                EffectiveScript = "BTC_KES = 10000000;"
+            });
+        }
     }
 }

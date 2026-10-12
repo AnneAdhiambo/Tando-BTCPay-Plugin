@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using BTCPayServer.Plugins.Tando.Services;
 using Microsoft.AspNetCore.Mvc.Rendering;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Converters;
 
 namespace BTCPayServer.Plugins.Tando.ViewModels;
 
@@ -31,6 +33,7 @@ public class TandoConnectLightningRequest
     public TandoLightningProvisionRequest LightningProvision { get; set; }
 }
 
+[JsonConverter(typeof(StringEnumConverter))]
 public enum TandoMpesaDestinationType { MobileNumber, TillNumber, PayBill }
 
 public class TandoMpesaSettingsRequest

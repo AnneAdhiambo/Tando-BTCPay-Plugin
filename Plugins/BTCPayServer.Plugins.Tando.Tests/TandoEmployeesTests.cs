@@ -2,6 +2,7 @@
 using BTCPayServer.Client;
 using BTCPayServer.Client.Models;
 using BTCPayServer.Controllers;
+using BTCPayServer.Plugins.Tando.Helper;
 using BTCPayServer.Plugins.Tando.Services;
 using BTCPayServer.Plugins.Tando.ViewModels;
 using BTCPayServer.Tests;
@@ -192,8 +193,8 @@ public class TandoEmployeesTests : PlaywrightBaseTest
         var records = await ParseJson(list);
 
         var phones = records.EnumerateArray().Select(r => r.GetProperty("phoneNumber").GetString()).ToList();
-        Assert.Contains(phoneA, phones);
-        Assert.Contains(phoneB, phones);
+        Assert.Contains(KenyanPhoneNumber.Normalize(phoneA), phones);
+        Assert.Contains(KenyanPhoneNumber.Normalize(phoneB), phones);
     }
 
     [Fact]

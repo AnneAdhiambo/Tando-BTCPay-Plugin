@@ -76,6 +76,10 @@ public class TandoEmployeesController(StoreRepository storeRepository, UserManag
     [HttpDelete("{userId}")]
     public async Task<IActionResult> Revoke(string storeId, string userId)
     {
+        var employees = await storeRepository.GetStoreUsers(storeId, new[] { StoreRoleId.Employee });
+        if (employees.All(u => u.Id != userId))
+            return BadRequest(new { error = "cannot_remove_last_owner_or_user_not_found" });
+
         var removed = await storeRepository.RemoveStoreUser(storeId, userId);
         if (!removed)
             return BadRequest(new { error = "cannot_remove_last_owner_or_user_not_found" });
