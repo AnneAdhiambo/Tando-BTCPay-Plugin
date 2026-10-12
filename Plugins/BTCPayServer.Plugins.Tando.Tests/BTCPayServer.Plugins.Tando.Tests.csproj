@@ -37,4 +37,13 @@
 		<ProjectReference Include="..\BTCPayServer.Plugins.Tando\BTCPayServer.Plugins.Tando.csproj" />
 	</ItemGroup>
 
+	<Target Name="WriteTandoDebugPlugins" AfterTargets="Build">
+		<PropertyGroup>
+			<TandoPluginDll>$([System.IO.Path]::GetFullPath('$(OutDir)BTCPayServer.Plugins.Tando.dll').Replace('\', '/'))</TandoPluginDll>
+		</PropertyGroup>
+		<WriteLinesToFile File="$(OutDir)appsettings.dev.json"
+		                  Lines="{&quot;DEBUG_PLUGINS&quot;:&quot;$(TandoPluginDll)&quot;}"
+		                  Overwrite="true" />
+	</Target>
+	
 </Project>
