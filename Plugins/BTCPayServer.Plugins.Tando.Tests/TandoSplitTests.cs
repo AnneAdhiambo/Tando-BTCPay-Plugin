@@ -185,7 +185,7 @@ public class TandoSplitTests : PlaywrightBaseTest
         var compute = await api.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
         Assert.Equal(200, compute.Status);
 
-        var update = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/mpesa-payout-status",
+        var update = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split/mpesa-payout-status",
             new APIRequestContextOptions
             {
                 DataObject = new { status = "Confirmed", payoutReference = "TANDO-REF-123" }
