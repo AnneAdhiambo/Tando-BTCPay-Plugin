@@ -275,6 +275,36 @@ public class TandoSplitTests : PlaywrightBaseTest
     }
 
     [Fact]
+    public async Task ListSplits_PagesNewestFirst_AndSkipsInvoicesWithoutASplit()
+    {
+        await InitializePlaywright(ServerTester);
+        var admin = await NewAdminAccount();
+        await EnsureTandoSubscriptionConfigured(admin);
+        var adminKey = await MintApiKey(admin);
+        var api = await ApiContextFor(adminKey);
+        var (storeId, merchantApi) = await SignupMerchant(api);
+        var amounts = new[] { 100m, 200m, 300m };
+        foreach (var amount in amounts)
+        {
+            var invoiceId = await CreateSettledInvoice(admin, storeId, amount);
+            var compute = await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
+            Assert.Equal(200, compute.Status);
+        }
+        await CreateSettledInvoice(admin, storeId, 999m);
+
+        async Task<List<decimal>> Page(int skip, int take)
+        {
+            var list = await merchantApi.GetAsync($"/plugins/api/tando/stores/{storeId}/splits?skip={skip}&take={take}");
+            Assert.Equal(200, list.Status);
+            return (await ParseJson(list)).EnumerateArray().Select(r => r.GetProperty("totalAmount").GetDecimal()).ToList();
+        }
+
+        Assert.Equal(new[] { 300m, 200m }, await Page(0, 2));
+        Assert.Equal(new[] { 100m }, await Page(2, 2));
+        Assert.Equal(new[] { 300m, 200m, 100m }, await Page(0, 50));
+    }
+
+    [Fact]
     public async Task ComputeSplit_OnUnsettledInvoice_IsRefusedAndCreatesNoPullPayment()
     {
         await InitializePlaywright(ServerTester);
