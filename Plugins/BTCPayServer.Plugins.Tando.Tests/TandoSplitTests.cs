@@ -2,8 +2,10 @@
 using BTCPayServer.Client;
 using BTCPayServer.Client.Models;
 using BTCPayServer.Controllers;
+using BTCPayServer.Events;
 using BTCPayServer.Plugins.Tando.Services;
 using BTCPayServer.Plugins.Tando.ViewModels;
+using BTCPayServer.Services.Invoices;
 using BTCPayServer.Tests;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Playwright;
@@ -114,6 +116,36 @@ public class TandoSplitTests : PlaywrightBaseTest
         return invoice.Id;
     }
 
+    private async Task<string> CreateSettledInvoice(TestAccount admin, string storeId, decimal amount)
+    {
+        var invoiceId = await CreateInvoice(admin, storeId, amount);
+        var client = await admin.CreateClient();
+        await client.MarkInvoiceStatus(invoiceId, new MarkInvoiceStatusRequest { Status = InvoiceStatus.Settled });
+        return invoiceId;
+    }
+
+    private static async Task EnableSplit(IAPIRequestContext api, string storeId, decimal mpesaPercentage)
+    {
+        var mpesa = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/mpesa",
+            new APIRequestContextOptions { DataObject = new { destinationType = "MobileNumber", destination = RandomKenyanPhone() } });
+        Assert.Equal(200, mpesa.Status);
+        var split = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/split-config",
+            new APIRequestContextOptions { DataObject = new { mpesaPercentage } });
+        Assert.Equal(200, split.Status);
+    }
+
+    private static async Task<JsonElement> WaitForSplit(IAPIRequestContext api, string storeId, string invoiceId)
+    {
+        for (var attempt = 0; attempt < 50; attempt++)
+        {
+            var get = await api.GetAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
+            if (get.Status == 200)
+                return await ParseJson(get);
+            await Task.Delay(200);
+        }
+        throw new Xunit.Sdk.XunitException($"No split was recorded for invoice {invoiceId} after it settled.");
+    }
+
     [Fact]
     public async Task ComputeSplit_AtZeroPercent_DefaultsToNotTriggeredAndSettled()
     {
@@ -216,5 +248,54 @@ public class TandoSplitTests : PlaywrightBaseTest
         var totals = records.EnumerateArray().Select(r => r.GetProperty("totalAmount").GetDecimal()).ToList();
         Assert.Contains(200m, totals);
         Assert.Contains(300m, totals);
+    }
+
+    [Fact]
+    public async Task ComputeSplit_OnUnsettledInvoice_IsRefusedAndCreatesNoPullPayment()
+    {
+        await InitializePlaywright(ServerTester);
+        var admin = await NewAdminAccount();
+        await EnsureTandoSubscriptionConfigured(admin);
+        var api = await ApiContextFor(await MintApiKey(admin));
+
+        var storeId = await SignupAndGetStoreId(api);
+        await EnableSplit(api, storeId, 50m);
+        var invoiceId = await CreateInvoice(admin, storeId, 1000m);
+
+        var compute = await api.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
+        Assert.Equal(400, compute.Status);
+        Assert.Equal("invoice_not_settled", (await ParseJson(compute)).GetProperty("error").GetString());
+
+        var get = await api.GetAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
+        Assert.Equal(404, get.Status);
+
+        var client = await admin.CreateClient();
+        Assert.Empty(await client.GetPullPayments(storeId));
+    }
+
+    [Fact]
+    public async Task SettlingInvoice_RecordsSplitAutomatically_Once()
+    {
+        await InitializePlaywright(ServerTester);
+        var admin = await NewAdminAccount();
+        await EnsureTandoSubscriptionConfigured(admin);
+        var api = await ApiContextFor(await MintApiKey(admin));
+
+        var storeId = await SignupAndGetStoreId(api);
+        await EnableSplit(api, storeId, 30m);
+        var invoiceId = await CreateSettledInvoice(admin, storeId, 1000m);
+
+        var record = await WaitForSplit(api, storeId, invoiceId);
+        Assert.Equal(30m, record.GetProperty("mpesaPercentage").GetDecimal());
+        Assert.Equal(300m, record.GetProperty("mpesaPortionAmount").GetDecimal());
+        Assert.Equal(700m, record.GetProperty("btcPortionAmount").GetDecimal());
+        var recordedAt = record.GetProperty("recordedAt").GetString();
+
+        var invoice = await ServerTester.PayTester.GetService<InvoiceRepository>().GetInvoice(invoiceId);
+        ServerTester.PayTester.GetService<EventAggregator>().Publish(new InvoiceEvent(invoice, InvoiceEvent.PaidInFull));
+        await Task.Delay(1000);
+
+        var after = await WaitForSplit(api, storeId, invoiceId);
+        Assert.Equal(recordedAt, after.GetProperty("recordedAt").GetString());
     }
 }

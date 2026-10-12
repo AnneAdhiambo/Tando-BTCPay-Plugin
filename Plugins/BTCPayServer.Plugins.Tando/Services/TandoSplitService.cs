@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections.Generic;
 using System.Linq;
+using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Client.Models;
 using BTCPayServer.Data.Payouts.LightningLike;
@@ -9,6 +10,7 @@ using BTCPayServer.Payouts;
 using BTCPayServer.Plugins.Tando.ViewModels;
 using BTCPayServer.Services.Invoices;
 using BTCPayServer.Services.Stores;
+using NBitpayClient;
 
 namespace BTCPayServer.Plugins.Tando.Services;
 
@@ -44,7 +46,22 @@ public class TandoSplitService(InvoiceRepository invoiceRepository, TandoSubscri
 {
     private const string SplitMetadataKey = "tandoSplit";
 
+    private static readonly SemaphoreSlim SplitLock = new(1, 1);
+
     public async Task<(TandoSplitRecord? Record, string? Error)> ComputeAndRecordSplit(string storeId, string invoiceId)
+    {
+        await SplitLock.WaitAsync();
+        try
+        {
+            return await ComputeAndRecordSplitCore(storeId, invoiceId);
+        }
+        finally
+        {
+            SplitLock.Release();
+        }
+    }
+
+    private async Task<(TandoSplitRecord? Record, string? Error)> ComputeAndRecordSplitCore(string storeId, string invoiceId)
     {
         var invoice = await invoiceRepository.GetInvoice(invoiceId);
         if (invoice is null || invoice.StoreId != storeId)
@@ -53,6 +70,9 @@ public class TandoSplitService(InvoiceRepository invoiceRepository, TandoSubscri
         var existing = GetRecord(invoice);
         if (existing is not null)
             return (existing, null);
+
+        if (invoice.Status != InvoiceStatus.Settled)
+            return (null, "invoice_not_settled");
 
         var splitConfig = await merchantSettingsService.GetSplitConfig(storeId);
         var mpesaSettings = await merchantSettingsService.GetMpesaSettings(storeId);
