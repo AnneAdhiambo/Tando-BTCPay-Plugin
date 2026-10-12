@@ -12,6 +12,7 @@ using Newtonsoft.Json;
 
 namespace BTCPayServer.Plugins.Tando.Tests;
 
+[Trait("Category", "Integration")]
 public class TandoLightningConnectTests : UnitTestBase
 {
     public TandoLightningConnectTests(ITestOutputHelper helper) : base(helper)
