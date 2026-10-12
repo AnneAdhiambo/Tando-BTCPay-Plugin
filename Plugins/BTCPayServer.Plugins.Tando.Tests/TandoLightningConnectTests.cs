@@ -23,6 +23,7 @@ public class TandoLightningConnectTests : UnitTestBase
     public async Task TandoLightningConnect_ValidatesAndEnforcesStoreScope()
     {
         using var s = CreateServerTester(newDb: true);
+        s.PayTester.LoadPluginsInDefaultAssemblyContext = true;
         await s.StartAsync();
         var user = s.NewAccount();
         await user.GrantAccessAsync();
