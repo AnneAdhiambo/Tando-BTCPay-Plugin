@@ -216,7 +216,7 @@ public class TandoMerchantSettingsTests : PlaywrightBaseTest
         var api = await ApiContextFor(adminKey);
         var (storeId, merchantApi) = await SignupMerchant(api);
 
-        await api.PutAsync($"/plugins/api/tando/stores/{storeId}/mpesa",
+        await merchantApi.PutAsync($"/plugins/api/tando/stores/{storeId}/mpesa",
             new APIRequestContextOptions
             {
                 DataObject = new { destinationType = "MobileNumber", destination = RandomKenyanPhone() }

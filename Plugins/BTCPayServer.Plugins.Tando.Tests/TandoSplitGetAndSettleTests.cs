@@ -180,8 +180,8 @@ public class TandoSplitGetAndSettleTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-        var (storeId, merchantApi) = await SignupMerchant(api);
-        var settle = await merchantApi.PutAsync($"/plugins/api/tando/stores/{storeId}/invoices/does-not-exist/split/settle");
+        var (storeId, _) = await SignupMerchant(api);
+        var settle = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/invoices/does-not-exist/split/settle");
         Assert.Equal(404, settle.Status);
     }
 
