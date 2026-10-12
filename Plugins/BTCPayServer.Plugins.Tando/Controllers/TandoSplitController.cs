@@ -33,11 +33,12 @@ public class TandoSplitController(TandoSplitService splitService) : Controller
     public async Task<IActionResult> Compute(string storeId, string invoiceId)
     {
         var (record, error) = await splitService.ComputeAndRecordSplit(storeId, invoiceId);
+
+        if (error == "invoice_not_settled")
+            return BadRequest(new { error, message = "Only a settled invoice can be split." });
+
         if (error is not null)
             return NotFound(new { error });
-
-        if(error == "invoice_not_settled")
-            return BadRequest(new { error, message = "Only a settled invoice can be split." });
 
         return Ok(record);
     }
