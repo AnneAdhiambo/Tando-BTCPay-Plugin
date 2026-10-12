@@ -67,7 +67,13 @@ public class TandoSplitTests : PlaywrightBaseTest
         var createResult = await manageController.AddApiKey(new UIManageController.AddApiKeyViewModel
         {
             Label = label,
-            PermissionValues = new List<UIManageController.AddApiKeyViewModel.PermissionValueItem> { permissionValue }
+            PermissionValues = storeId is null
+                ? new List<UIManageController.AddApiKeyViewModel.PermissionValueItem>
+                {
+                    permissionValue,
+                    new() { Permission = Policies.CanModifyServerSettings, Value = true }
+                }
+                : new List<UIManageController.AddApiKeyViewModel.PermissionValueItem> { permissionValue }
         });
         Assert.IsType<RedirectToActionResult>(createResult);
 
@@ -96,18 +102,26 @@ public class TandoSplitTests : PlaywrightBaseTest
     private static async Task<JsonElement> ParseJson(IAPIResponse response)
         => JsonDocument.Parse(await response.TextAsync()).RootElement;
 
-    private async Task<string> SignupAndGetStoreId(IAPIRequestContext api)
+    private readonly Dictionary<string, string> _merchantKeys = new();
+
+    private async Task<(string StoreId, IAPIRequestContext Api)> SignupMerchant(IAPIRequestContext backendApi, string phone = null)
     {
-        var response = await api.PostAsync("/plugins/api/tando/signup",
-            new APIRequestContextOptions { DataObject = new { phoneNumber = RandomKenyanPhone() } });
+        var response = await backendApi.PostAsync("/plugins/api/tando/signup",
+            new APIRequestContextOptions { DataObject = new { phoneNumber = phone ?? RandomKenyanPhone() } });
         var body = await response.TextAsync();
         Assert.True(response.Ok, $"Signup failed ({response.Status}): {body}");
-        return JsonDocument.Parse(body).RootElement.GetProperty("storeId").GetString();
+        var root = JsonDocument.Parse(body).RootElement;
+        var storeId = root.GetProperty("storeId").GetString();
+        var apiKey = root.GetProperty("apiKey").GetString();
+        _merchantKeys[storeId] = apiKey;
+        return (storeId, await ApiContextFor(apiKey));
     }
+
+    private BTCPayServerClient MerchantClient(string storeId) => new(ServerUri, _merchantKeys[storeId]);
 
     private async Task<string> CreateInvoice(TestAccount admin, string storeId, decimal amount)
     {
-        var client = await admin.CreateClient();
+        var client = MerchantClient(storeId);
         await EnsureStoreWallet(client, storeId);
         var invoice = await client.CreateInvoice(storeId, new CreateInvoiceRequest
         {
@@ -120,7 +134,7 @@ public class TandoSplitTests : PlaywrightBaseTest
     private async Task<string> CreateSettledInvoice(TestAccount admin, string storeId, decimal amount)
     {
         var invoiceId = await CreateInvoice(admin, storeId, amount);
-        var client = await admin.CreateClient();
+        var client = MerchantClient(storeId);
         await client.MarkInvoiceStatus(invoiceId, new MarkInvoiceStatusRequest { Status = InvoiceStatus.Settled });
         return invoiceId;
     }
@@ -155,13 +169,12 @@ public class TandoSplitTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-
-        var storeId = await SignupAndGetStoreId(api);
+        var (storeId, merchantApi) = await SignupMerchant(api);
         var invoiceId = await CreateSettledInvoice(admin, storeId, 1000m);
 
         // split-config defaults to 0% (no PUT called), so ComputeAndRecordSplit
         // should never reach CreateAndClaimPayout at all.
-        var compute = await api.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
+        var compute = await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
         Assert.Equal(200, compute.Status);
         var record = await ParseJson(compute);
 
@@ -178,11 +191,10 @@ public class TandoSplitTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-
-        var storeId = await SignupAndGetStoreId(api);
+        var (storeId, merchantApi) = await SignupMerchant(api);
         var invoiceId = await CreateSettledInvoice(admin, storeId, 500m);
 
-        var compute = await api.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
+        var compute = await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
         Assert.Equal(200, compute.Status);
 
         var update = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split/mpesa-payout-status",
@@ -192,7 +204,7 @@ public class TandoSplitTests : PlaywrightBaseTest
             });
         Assert.Equal(200, update.Status);
 
-        var get = await api.GetAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
+        var get = await merchantApi.GetAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
         Assert.Equal(200, get.Status);
         var record = await ParseJson(get);
 
@@ -203,22 +215,21 @@ public class TandoSplitTests : PlaywrightBaseTest
     }
 
     [Fact]
-    public async Task UpdateMpesaPayoutStatus_UnknownInvoice_ReturnsForbidden()
+    public async Task UpdateMpesaPayoutStatus_UnknownInvoice_ReturnsNotFound()
     {
         await InitializePlaywright(ServerTester);
         var admin = await NewAdminAccount();
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-
-        var storeId = await SignupAndGetStoreId(api);
+        var (storeId, _) = await SignupMerchant(api);
 
         var update = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/invoices/does-not-exist/split/mpesa-payout-status",
             new APIRequestContextOptions
             {
                 DataObject = new { status = "Confirmed", payoutReference = (string)null }
             });
-        Assert.Equal(403, update.Status);
+        Assert.Equal(404, update.Status);
     }
 
     [Fact]
@@ -229,15 +240,14 @@ public class TandoSplitTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-
-        var storeId = await SignupAndGetStoreId(api);
+        var (storeId, merchantApi) = await SignupMerchant(api);
 
         var invoiceAId = await CreateSettledInvoice(admin, storeId, 200m);
         var invoiceBId = await CreateSettledInvoice(admin, storeId, 300m);
-        await api.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceAId}/split");
-        await api.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceBId}/split");
+        await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceAId}/split");
+        await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceBId}/split");
 
-        var list = await api.GetAsync($"/plugins/api/tando/stores/{storeId}/splits");
+        var list = await merchantApi.GetAsync($"/plugins/api/tando/stores/{storeId}/splits");
         Assert.Equal(200, list.Status);
         var records = await ParseJson(list);
 
@@ -255,19 +265,18 @@ public class TandoSplitTests : PlaywrightBaseTest
         var admin = await NewAdminAccount();
         await EnsureTandoSubscriptionConfigured(admin);
         var api = await ApiContextFor(await MintApiKey(admin));
-
-        var storeId = await SignupAndGetStoreId(api);
-        await EnableSplit(api, storeId, 50m);
+        var (storeId, merchantApi) = await SignupMerchant(api);
+        await EnableSplit(merchantApi, storeId, 50m);
         var invoiceId = await CreateInvoice(admin, storeId, 1000m);
 
-        var compute = await api.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
+        var compute = await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
         Assert.Equal(400, compute.Status);
         Assert.Equal("invoice_not_settled", (await ParseJson(compute)).GetProperty("error").GetString());
 
-        var get = await api.GetAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
+        var get = await merchantApi.GetAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
         Assert.Equal(404, get.Status);
 
-        var client = await admin.CreateClient();
+        var client = MerchantClient(storeId);
         Assert.Empty(await client.GetPullPayments(storeId));
     }
 
@@ -278,12 +287,11 @@ public class TandoSplitTests : PlaywrightBaseTest
         var admin = await NewAdminAccount();
         await EnsureTandoSubscriptionConfigured(admin);
         var api = await ApiContextFor(await MintApiKey(admin));
-
-        var storeId = await SignupAndGetStoreId(api);
-        await EnableSplit(api, storeId, 30m);
+        var (storeId, merchantApi) = await SignupMerchant(api);
+        await EnableSplit(merchantApi, storeId, 30m);
         var invoiceId = await CreateSettledInvoice(admin, storeId, 1000m);
 
-        var record = await WaitForSplit(api, storeId, invoiceId);
+        var record = await WaitForSplit(merchantApi, storeId, invoiceId);
         Assert.Equal(30m, record.GetProperty("mpesaPercentage").GetDecimal());
         Assert.Equal(300m, record.GetProperty("mpesaPortionAmount").GetDecimal());
         Assert.Equal(700m, record.GetProperty("btcPortionAmount").GetDecimal());
@@ -293,7 +301,7 @@ public class TandoSplitTests : PlaywrightBaseTest
         ServerTester.PayTester.GetService<EventAggregator>().Publish(new InvoiceEvent(invoice, InvoiceEvent.PaidInFull));
         await Task.Delay(1000);
 
-        var after = await WaitForSplit(api, storeId, invoiceId);
+        var after = await WaitForSplit(merchantApi, storeId, invoiceId);
         Assert.Equal(recordedAt, after.GetProperty("recordedAt").GetString());
     }
 

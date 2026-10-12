@@ -55,7 +55,7 @@ public class TandoLightningConnectTests : UnitTestBase
 
         const string connectionString = "type=clightning;server=tcp://127.0.0.1:9735";
         using (var missingStoreResponse = await Connect(unscopedKey, "missing-store", connectionString))
-            Assert.Equal(HttpStatusCode.NotFound, missingStoreResponse.StatusCode);
+            Assert.Equal(HttpStatusCode.Forbidden, missingStoreResponse.StatusCode);
 
         using (var validResponse = await Connect(unscopedKey, user.StoreId, connectionString))
             Assert.Equal(HttpStatusCode.OK, validResponse.StatusCode);
