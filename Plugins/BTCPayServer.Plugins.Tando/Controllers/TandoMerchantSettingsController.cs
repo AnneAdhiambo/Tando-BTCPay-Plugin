@@ -6,12 +6,13 @@ using BTCPayServer.Plugins.Tando.ViewModels;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
 
-namespace BTCPayServer.Plugins.MassStoreGenerator;
+namespace BTCPayServer.Plugins.Tando;
 
 [Route("~/plugins/api/tando/stores/{storeId}")]
 [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
 [IgnoreAntiforgeryToken]
-public class TandoMerchantSettingsController(TandoMerchantSettingsService settingsService) : Controller
+
+public class TandoMerchantSettingsController(TandoMerchantSettingsService settingsService, TandoSubscriptionService subscriptionService) : Controller
 {
     [HttpGet("mpesa")]
     public async Task<IActionResult> GetMpesaSettings(string storeId)
@@ -48,6 +49,15 @@ public class TandoMerchantSettingsController(TandoMerchantSettingsService settin
     {
         if (request is null || request.MpesaPercentage is < 0 or > 100)
             return BadRequest(new { error = "invalid_percentage", detail = "MpesaPercentage must be between 0 and 100." });
+
+        if (request.MpesaPercentage > 0 && !(await subscriptionService.GetSettings()).IsTreasuryConfigured)
+        {
+            return BadRequest(new
+            {
+                error = "treasury_not_configured",
+                message = "Split payments aren't available yet. The Tando team needs to set a treasury Lightning address first."
+            });
+        }
 
         var mpesaSettings = await settingsService.GetMpesaSettings(storeId);
         if (request.MpesaPercentage > 0 && mpesaSettings is null)

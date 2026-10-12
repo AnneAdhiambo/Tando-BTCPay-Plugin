@@ -81,6 +81,8 @@ public class TandoSplitService(InvoiceRepository invoiceRepository, TandoSubscri
             return (null, "invoice_not_settled");
 
         var splitConfig = await merchantSettingsService.GetSplitConfig(storeId);
+        if (splitConfig.MpesaPercentage > 0 && !(await subscriptionService.GetSettings()).IsTreasuryConfigured)
+            return (null, "treasury_not_configured");
         var mpesaSettings = await merchantSettingsService.GetMpesaSettings(storeId);
 
         var paidAmount = Math.Max(0m, invoice.PaidAmount?.Net ?? 0m);
@@ -180,8 +182,16 @@ public class TandoSplitService(InvoiceRepository invoiceRepository, TandoSubscri
     private async Task<TandoSplitRecord> CreateAndClaimPayout(string storeId, string invoiceId, TandoSplitRecord record)
     {
         var settings = await subscriptionService.GetSettings();
-        if (string.IsNullOrWhiteSpace(settings.TreasuryLightningAddress))
+        if (!settings.IsTreasuryConfigured)
             return record;
+
+        if (settings.MaxPayoutAmount is { } maxPayout && record.MpesaPortionAmount > maxPayout)
+        {
+            record.PullPaymentStatus = TandoPullPaymentStatus.Failed;
+            record.PullPaymentError = "payout_limit_exceeded";
+            await invoiceRepository.UpdateInvoiceMetadata(invoiceId, SplitMetadataKey, record);
+            return record;
+        }
 
         var store = await storeRepository.FindStore(storeId);
         if (store is null)

@@ -312,7 +312,10 @@ paths:
       responses:
         "200": { description: Saved }
         "400":
-          description: Invalid percentage, or no M-Pesa destination set yet
+          description: >
+            `invalid_percentage`, `mpesa_destination_required`, or
+            `treasury_not_configured` (a percentage above 0 while the Tando team
+            hasn't set a treasury Lightning address)
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -365,7 +368,10 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/TandoSplitRecord" }
         "400":
-          description: "`invoice_not_settled`: only a settled invoice can be split"
+          description: >
+            `invoice_not_settled` (only a settled invoice can be split) or
+            `treasury_not_configured` (the store has a percentage above 0 but no
+            treasury Lightning address is set)
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
