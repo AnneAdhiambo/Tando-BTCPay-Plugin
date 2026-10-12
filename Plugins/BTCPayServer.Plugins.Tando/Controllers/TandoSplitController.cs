@@ -22,7 +22,7 @@ public class TandoSplitController(TandoSplitService splitService) : Controller
         return Ok(record);
     }
 
-    [HttpGet("list")]
+    [HttpGet("~/plugins/api/tando/stores/{storeId}/splits")]
     public async Task<IActionResult> List(string storeId, int skip = 0, int take = 50)
     {
         var records = await splitService.ListSplits(storeId, skip, take);

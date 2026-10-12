@@ -11,11 +11,15 @@ using BTCPayServer.Plugins.Tando.ViewModels;
 using BTCPayServer.Services.Invoices;
 using BTCPayServer.Services.Stores;
 using NBitpayClient;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Converters;
 
 namespace BTCPayServer.Plugins.Tando.Services;
 
+[JsonConverter(typeof(StringEnumConverter))]
 public enum TandoPullPaymentStatus { NotApplicable, Created, Claimed, Failed }
 
+[JsonConverter(typeof(StringEnumConverter))]
 public enum TandoMpesaPayoutStatus { NotTriggered, Triggered, Confirmed, Failed }
 public record TandoUpdateMpesaPayoutStatusRequest(TandoMpesaPayoutStatus Status, string? PayoutReference, string? Error);
 

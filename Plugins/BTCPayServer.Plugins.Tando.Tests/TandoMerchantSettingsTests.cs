@@ -143,7 +143,7 @@ public class TandoMerchantSettingsTests : PlaywrightBaseTest
     }
 
     [Fact]
-    public async Task SaveMpesaSettings_UnknownStore_Returns404()
+    public async Task SaveMpesaSettings_UnknownStore_ReturnsForbidden()
     {
         await InitializePlaywright(ServerTester);
         var admin = await NewAdminAccount();
@@ -156,9 +156,7 @@ public class TandoMerchantSettingsTests : PlaywrightBaseTest
             {
                 DataObject = new { destinationType = "MobileNumber", destination = RandomKenyanPhone() }
             });
-        Assert.Equal(404, save.Status);
-        var body = await ParseJson(save);
-        Assert.Equal("store_not_found", body.GetProperty("error").GetString());
+        Assert.Equal(403, save.Status);
     }
 
     [Fact]

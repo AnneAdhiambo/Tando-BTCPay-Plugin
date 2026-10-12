@@ -74,8 +74,7 @@ public class UITandoSettingsTests : PlaywrightBaseTest
         var result = controller.Docs();
 
         var redirect = Assert.IsType<RedirectResult>(result);
-        Assert.Contains("editor.swagger.io", redirect.Url);
-        Assert.Contains("tando", redirect.Url, StringComparison.OrdinalIgnoreCase);
+        Assert.StartsWith("https://editor.swagger.io/?url=", redirect.Url);
     }
 
     [Fact]

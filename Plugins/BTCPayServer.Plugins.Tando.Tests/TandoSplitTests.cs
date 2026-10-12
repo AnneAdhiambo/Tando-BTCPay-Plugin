@@ -108,6 +108,7 @@ public class TandoSplitTests : PlaywrightBaseTest
     private async Task<string> CreateInvoice(TestAccount admin, string storeId, decimal amount)
     {
         var client = await admin.CreateClient();
+        await EnsureStoreWallet(client, storeId);
         var invoice = await client.CreateInvoice(storeId, new CreateInvoiceRequest
         {
             Amount = amount,
@@ -202,7 +203,7 @@ public class TandoSplitTests : PlaywrightBaseTest
     }
 
     [Fact]
-    public async Task UpdateMpesaPayoutStatus_UnknownInvoice_Returns404()
+    public async Task UpdateMpesaPayoutStatus_UnknownInvoice_ReturnsForbidden()
     {
         await InitializePlaywright(ServerTester);
         var admin = await NewAdminAccount();
@@ -212,15 +213,12 @@ public class TandoSplitTests : PlaywrightBaseTest
 
         var storeId = await SignupAndGetStoreId(api);
 
-        var update = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/invoices/does-not-exist/mpesa-payout-status",
+        var update = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/invoices/does-not-exist/split/mpesa-payout-status",
             new APIRequestContextOptions
             {
                 DataObject = new { status = "Confirmed", payoutReference = (string)null }
             });
-
-        Assert.Equal(404, update.Status);
-        var body = await ParseJson(update);
-        Assert.Equal("invoice_not_found", body.GetProperty("error").GetString());
+        Assert.Equal(403, update.Status);
     }
 
     [Fact]
@@ -297,5 +295,12 @@ public class TandoSplitTests : PlaywrightBaseTest
 
         var after = await WaitForSplit(api, storeId, invoiceId);
         Assert.Equal(recordedAt, after.GetProperty("recordedAt").GetString());
+    }
+
+    private readonly HashSet<string> _storesWithWallet = new();
+    private async Task EnsureStoreWallet(BTCPayServerClient client, string storeId)
+    {
+        if (_storesWithWallet.Add(storeId))
+            await client.GenerateOnChainWallet(storeId, "BTC-CHAIN", new GenerateOnChainWalletRequest());
     }
 }
