@@ -22,6 +22,7 @@ public class TandoMerchantAccountService(UserManager<ApplicationUser> userManage
         Policies.CanModifyStoreSettings,
         Policies.CanViewProfile
     };
+    private static string RandomPassword() => Encoders.Base58.EncodeData(RandomUtils.GetBytes(32)) + "aA1!";
 
     public static string SyntheticEmail(string normalizedPhone) => $"{normalizedPhone}@{SyntheticEmailDomain}";
 
@@ -32,7 +33,11 @@ public class TandoMerchantAccountService(UserManager<ApplicationUser> userManage
         var email = SyntheticEmail(normalizedPhone);
         var user = await userManager.FindByEmailAsync(email);
         if (user is not null)
+        {
+            if (user.PasswordHash is null)
+                await userManager.AddPasswordAsync(user, RandomPassword());
             return (user, true, Array.Empty<string>());
+        }
 
         user = new ApplicationUser
         {
@@ -46,7 +51,7 @@ public class TandoMerchantAccountService(UserManager<ApplicationUser> userManage
         var blob = user.GetBlob() ?? new UserBlob();
         blob.Name = normalizedPhone;
         user.SetBlob(blob);
-        var result = await userManager.CreateAsync(user);
+        var result = await userManager.CreateAsync(user, RandomPassword());
         return result.Succeeded ? (user, false, Array.Empty<string>()) : (null, false, result.Errors.Select(e => e.Description).ToArray());
     }
 
