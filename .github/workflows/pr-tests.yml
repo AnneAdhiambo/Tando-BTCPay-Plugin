@@ -56,6 +56,9 @@ jobs:
       - name: Run integration tests
         run: dotnet test Plugins/BTCPayServer.Plugins.Tando.Tests --filter "Integration=Integration" --logger "trx;LogFileName=integration-tests.trx" --results-directory /tmp/TestResults
 
+      - name: Fail if no tests ran
+        run: .github/scripts/assert-tests-ran.sh /tmp/TestResults/integration-tests.trx
+
       - name: Upload test results
         if: always()
         uses: actions/upload-artifact@v4
@@ -99,6 +102,9 @@ jobs:
 
       - name: Run Playwright tests (both batches)
         run: dotnet test Plugins/BTCPayServer.Plugins.Tando.Tests --filter "Playwright=Playwright|Playwright=Playwright-2" --logger "trx;LogFileName=playwright-tests.trx" --results-directory /tmp/TestResults
+
+      - name: Fail if no tests ran
+        run: .github/scripts/assert-tests-ran.sh /tmp/TestResults/playwright-tests.trx
 
       - name: Upload test results
         if: always()
