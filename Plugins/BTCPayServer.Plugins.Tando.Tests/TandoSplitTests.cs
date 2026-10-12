@@ -9,6 +9,7 @@ using BTCPayServer.Services.Invoices;
 using BTCPayServer.Tests;
 using Microsoft.AspNetCore.Mvc;
 using Microsoft.Playwright;
+using NBitcoin;
 
 namespace BTCPayServer.Plugins.Tando.Tests;
 
@@ -139,6 +140,21 @@ public class TandoSplitTests : PlaywrightBaseTest
         return invoiceId;
     }
 
+    private async Task<string> CreatePaidInvoice(string storeId, decimal amount)
+    {
+        var client = MerchantClient(storeId);
+        await EnsureStoreWallet(client, storeId);
+        var invoice = await client.CreateInvoice(storeId, new CreateInvoiceRequest { Amount = amount, Currency = "KES" });
+        var method = (await client.GetInvoicePaymentMethods(invoice.Id)).First(m => m.PaymentMethodId == "BTC-CHAIN");
+        await ServerTester.ExplorerNode.SendToAddressAsync(
+            BitcoinAddress.Create(method.Destination, ServerTester.NetworkProvider.BTC.NBitcoinNetwork),
+            Money.Coins(method.Due));
+        await ServerTester.ExplorerNode.GenerateAsync(1);
+        await TestUtils.EventuallyAsync(async () =>
+            Assert.Equal(InvoiceStatus.Settled, (await client.GetInvoice(invoice.Id)).Status));
+        return invoice.Id;
+    }
+
     private static async Task EnableSplit(IAPIRequestContext api, string storeId, decimal mpesaPercentage)
     {
         var mpesa = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/mpesa",
@@ -177,7 +193,6 @@ public class TandoSplitTests : PlaywrightBaseTest
         var compute = await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
         Assert.Equal(200, compute.Status);
         var record = await ParseJson(compute);
-
         Assert.Equal("NotTriggered", record.GetProperty("mpesaPayoutStatus").GetString());
         Assert.True(record.GetProperty("mpesaSettled").GetBoolean());
         Assert.Equal(0m, record.GetProperty("mpesaPortionAmount").GetDecimal());
@@ -289,7 +304,7 @@ public class TandoSplitTests : PlaywrightBaseTest
         var api = await ApiContextFor(await MintApiKey(admin));
         var (storeId, merchantApi) = await SignupMerchant(api);
         await EnableSplit(merchantApi, storeId, 30m);
-        var invoiceId = await CreateSettledInvoice(admin, storeId, 1000m);
+        var invoiceId = await CreatePaidInvoice(storeId, 1000m);
 
         var record = await WaitForSplit(merchantApi, storeId, invoiceId);
         Assert.Equal(30m, record.GetProperty("mpesaPercentage").GetDecimal());
@@ -304,6 +319,8 @@ public class TandoSplitTests : PlaywrightBaseTest
         var after = await WaitForSplit(merchantApi, storeId, invoiceId);
         Assert.Equal(recordedAt, after.GetProperty("recordedAt").GetString());
     }
+
+
 
     private readonly HashSet<string> _storesWithWallet = new();
     private async Task EnsureStoreWallet(BTCPayServerClient client, string storeId)
