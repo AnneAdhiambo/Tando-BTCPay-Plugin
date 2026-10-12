@@ -28,6 +28,7 @@ public class Plugin : BaseBTCPayServerPlugin
         services.AddScoped<TandoMerchantAccountService>();
         services.AddScoped<TandoMerchantSettingsService>();
         services.AddScoped<TandoProductProvisioningService>();
+        services.AddHostedService<TandoSplitIndexHostedService>();
         services.AddHostedService<TandoPlanFallbackHostedService>();
         services.AddSingleton<TandoLightningProvisionerFactory>();
         services.AddSingleton<ITandoLightningProvisioner, NwcLightningProvisioner>();
