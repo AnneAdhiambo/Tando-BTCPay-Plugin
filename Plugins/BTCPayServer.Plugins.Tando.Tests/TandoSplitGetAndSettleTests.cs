@@ -115,6 +115,14 @@ public class TandoSplitGetAndSettleTests : PlaywrightBaseTest
         return invoice.Id;
     }
 
+    private async Task<string> CreateSettledInvoice(TestAccount admin, string storeId, decimal amount)
+    {
+        var invoiceId = await CreateInvoice(admin, storeId, amount);
+        var client = await admin.CreateClient();
+        await client.MarkInvoiceStatus(invoiceId, new MarkInvoiceStatusRequest { Status = InvoiceStatus.Settled });
+        return invoiceId;
+    }
+
     [Fact]
     public async Task Get_BeforeSplitComputed_Returns404()
     {
@@ -141,7 +149,7 @@ public class TandoSplitGetAndSettleTests : PlaywrightBaseTest
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
         var storeId = await SignupAndGetStoreId(api);
-        var invoiceId = await CreateInvoice(admin, storeId, 400m);
+        var invoiceId = await CreateSettledInvoice(admin, storeId, 400m);
 
         await api.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
 
@@ -173,7 +181,7 @@ public class TandoSplitGetAndSettleTests : PlaywrightBaseTest
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
         var storeId = await SignupAndGetStoreId(api);
-        var invoiceId = await CreateInvoice(admin, storeId, 150m);
+        var invoiceId = await CreateSettledInvoice(admin, storeId, 150m);
 
         var compute = await api.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
         Assert.Equal(200, compute.Status);
