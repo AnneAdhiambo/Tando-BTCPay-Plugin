@@ -29,6 +29,7 @@ public record TandoSplitRecord
     public decimal TotalAmount { get; set; }
     public string Currency { get; set; } = "";
     public decimal BtcPortionAmount { get; set; }
+    public decimal PaidAmount { get; set; }
     public decimal MpesaPortionAmount { get; set; }
     public decimal MpesaPercentage { get; set; }
     public TandoMpesaDestinationType? MpesaDestinationType { get; set; }
@@ -81,10 +82,14 @@ public class TandoSplitService(InvoiceRepository invoiceRepository, TandoSubscri
 
         var splitConfig = await merchantSettingsService.GetSplitConfig(storeId);
         var mpesaSettings = await merchantSettingsService.GetMpesaSettings(storeId);
-        var mpesaPortion = Math.Round(invoice.Price * (splitConfig.MpesaPercentage / 100m), 2);
+
+        var paidAmount = Math.Max(0m, invoice.PaidAmount?.Net ?? 0m);
+        var splitBase = Math.Min(paidAmount, invoice.Price);
+        var mpesaPortion = Math.Round(splitBase * (splitConfig.MpesaPercentage / 100m), 2);
         var record = new TandoSplitRecord
         {
             TotalAmount = invoice.Price,
+            PaidAmount = paidAmount,
             Currency = invoice.Currency,
             MpesaPortionAmount = mpesaPortion,
             BtcPortionAmount = invoice.Price - mpesaPortion,
