@@ -36,6 +36,9 @@ public class TandoSplitController(TandoSplitService splitService) : Controller
         if (error is not null)
             return NotFound(new { error });
 
+        if(error == "invoice_not_settled")
+            return BadRequest(new { error, message = "Only a settled invoice can be split." });
+
         return Ok(record);
     }
 
