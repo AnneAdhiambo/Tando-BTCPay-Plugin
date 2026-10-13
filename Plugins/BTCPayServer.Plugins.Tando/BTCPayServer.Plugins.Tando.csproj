@@ -30,6 +30,7 @@
   already referenced by BTCPay Server Core project -->
 
   <ItemGroup Condition="$(Configuration) != 'Release'">
+    <PackageReference Include="Microsoft.CodeAnalysis" Version="5.6.0" />
     <PackageReference Include="Microsoft.CodeAnalysis.Common" Version="5.6.0" />
     <PackageReference Include="Microsoft.CodeAnalysis.CSharp" Version="5.6.0" />
 	<PackageReference Include="Microsoft.CodeAnalysis.Workspaces.Common" Version="5.6.0" />
@@ -41,7 +42,6 @@
   </ItemGroup>
 
   <ItemGroup>
-    <PackageReference Include="Microsoft.CodeAnalysis" Version="5.6.0" />
     <PackageReference Include="NNostr.Client" Version="0.0.55" />
   </ItemGroup>
 
