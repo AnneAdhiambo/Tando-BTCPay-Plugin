@@ -6,23 +6,20 @@ using BTCPayServer.Abstractions.Constants;
 using BTCPayServer.Abstractions.Extensions;
 using BTCPayServer.Client;
 using BTCPayServer.Data;
-using BTCPayServer.Payments;
-using BTCPayServer.Payments.Lightning;
 using BTCPayServer.Plugins.Tando.Helper;
 using BTCPayServer.Plugins.Tando.Services;
 using BTCPayServer.Plugins.Tando.ViewModels;
 using BTCPayServer.Services.Stores;
 using Microsoft.AspNetCore.Authorization;
 using Microsoft.AspNetCore.Mvc;
-using Newtonsoft.Json.Linq;
 
-namespace BTCPayServer.Plugins.MassStoreGenerator;
+namespace BTCPayServer.Plugins.Tando;
 
 [Route("~/plugins/api/tando/")]
-[Authorize(Policy = Policies.CanModifyStoreSettingsUnscoped, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
+[Authorize(Policy = Policies.CanModifyServerSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
 [IgnoreAntiforgeryToken]
 public class TandoOnboardingController(StoreRepository storeRepository, TandoSubscriptionService subscriptionService, 
-    TandoProductProvisioningService productProvisioningService, TandoLightningProvisionerFactory lightningProvisionerFactor) : Controller
+    TandoProductProvisioningService productProvisioningService, TandoMerchantAccountService accountService) : Controller
 {
     private const string PreferredRateSource = "bitcoinkenya";
     private const string DefaultCurrency = "KES";
@@ -83,9 +80,13 @@ public class TandoOnboardingController(StoreRepository storeRepository, TandoSub
             if (!status.Active)
                 return StatusCode(500, new { error = "subscriber_creation_failed" });
         }
-        var callerId = User.GetId();
-        var userStore = await storeRepository.GetStoresByUserId(callerId);
-        var existingStore = userStore.FirstOrDefault(s => s.StoreName == normalizedPhone);
+        var (merchant, _, errors) = await accountService.GetOrCreateUser(normalizedPhone);
+        if (merchant is null)
+            return BadRequest(new { error = "merchant_user_creation_failed", detail = errors });
+
+        var existingStore = await FindOwnedStore(merchant.Id, normalizedPhone);
+
+
         if (existingStore is not null)
         {
             await RefreshPlanMetadata(existingStore, status.PlanId);
@@ -96,7 +97,9 @@ public class TandoOnboardingController(StoreRepository storeRepository, TandoSub
                 PhoneNumber = normalizedPhone,
                 AlreadyExisted = true,
                 PosAppId = posAppId,
-                CartAppId = cartAppId
+                CartAppId = cartAppId,
+                UserId = merchant.Id,
+                ApiKey = await accountService.CreateAppKey(merchant.Id, request.DeviceName),
             });
         }
         var store = await storeRepository.GetDefaultStoreTemplate();
@@ -109,7 +112,7 @@ public class TandoOnboardingController(StoreRepository storeRepository, TandoSub
         blob.AdditionalData[PhoneMetadataKey] = normalizedPhone;
         blob.AdditionalData[PlanMetadataKey] = status.PlanId;
         store.SetStoreBlob(blob);
-        var result = await storeRepository.CreateStore(callerId, store);
+        var result = await storeRepository.CreateStore(merchant.Id, store);
         if (result != StoreRepository.CreateStoreResult.Created)
             return BadRequest(new { error = "store_creation_failed", detail = result.ToString() });
 
@@ -120,9 +123,48 @@ public class TandoOnboardingController(StoreRepository storeRepository, TandoSub
             PhoneNumber = normalizedPhone,
             AlreadyExisted = false,
             PosAppId = newPosAppId,
-            CartAppId = newCartAppId
+            CartAppId = newCartAppId,
+            UserId = merchant.Id,
+            ApiKey = await accountService.CreateAppKey(merchant.Id, request.DeviceName)
         });
     }
+
+    [HttpPost("users/api-keys")]
+    public async Task<IActionResult> IssueAppKey([FromBody] TandoIssueAppKeyRequest request)
+    {
+        var normalizedPhone = KenyanPhoneNumber.Normalize(request?.PhoneNumber);
+        if (normalizedPhone is null)
+            return BadRequest(new { error = "invalid_phone_number", detail = $"Expected a Kenyan MSISDN, e.g. {KenyanPhoneNumber.ExampleFormat}." });
+
+        var user = await accountService.FindUser(normalizedPhone);
+        var stores = user is null ? Array.Empty<StoreData>() : await storeRepository.GetStoresByUserId(user.Id);
+        if (user is null || stores.Length == 0)
+            return NotFound(new { error = "no_store_access" });
+
+        return Ok(new TandoIssueAppKeyResponse
+        {
+            UserId = user.Id,
+            PhoneNumber = normalizedPhone,
+            ApiKey = await accountService.CreateAppKey(user.Id, request!.DeviceName),
+            Stores = stores.Select(s => new TandoStoreAccess
+            {
+                StoreId = s.Id,
+                StoreName = s.StoreName,
+                Role = s.GetStoreRoleOfUser(user.Id)?.Role
+            }).ToArray()
+        });
+    }
+
+    private async Task<StoreData?> FindOwnedStore(string merchantId, string normalizedPhone)
+    {
+        var stores = await storeRepository.GetStoresByUserId(merchantId);
+        return stores.FirstOrDefault(s =>
+            s.GetStoreRoleOfUser(merchantId)?.Role == StoreRoleId.Owner.Role &&
+            s.GetStoreBlob().AdditionalData.TryGetValue(PhoneMetadataKey, out var phone) &&
+            phone?.ToString() == normalizedPhone);
+    }
+
+
 
     private async Task RefreshPlanMetadata(StoreData store, string? currentPlanId)
     {
@@ -132,47 +174,5 @@ public class TandoOnboardingController(StoreRepository storeRepository, TandoSub
         blob.AdditionalData[PlanMetadataKey] = currentPlanId;
         store.SetStoreBlob(blob);
         await storeRepository.UpdateStore(store);
-    }
-
-    [HttpPut("stores/{storeId}/lightning/connect")]
-    public async Task<IActionResult> ConnectLightning(string storeId, [FromBody] TandoConnectLightningRequest request)
-    {
-        string connectionString;
-        if (!string.IsNullOrWhiteSpace(request?.ConnectionString))
-        {
-            connectionString = request.ConnectionString;
-        }
-        else if (request?.LightningProvision is not null)
-        {
-            var provisioner = lightningProvisionerFactor.Get(request.LightningProvision.ProviderType);
-            if (provisioner is null)
-                return BadRequest(new { error = "unsupported_provider_type" });
-
-            var result = await provisioner.Provision(request.LightningProvision);
-            if (!result.IsSuccess)
-                return BadRequest(new { error = result.Error });
-
-            connectionString = result.ConnectionString!;
-        }
-        else
-        {
-            return BadRequest(new { error = "connection_string_required" });
-        }
-
-        var callerId = User.GetId();
-        var ownedStores = await storeRepository.GetStoresByUserId(callerId);
-        // 404, not 403: don't reveal to a non-owner whether storeId exists at all.
-        var store = ownedStores.FirstOrDefault(s => s.Id == storeId);
-        if (store is null)
-            return NotFound(new { error = "store_not_found" });
-
-        var paymentMethodId = PaymentTypes.LN.GetPaymentMethodId("BTC");
-        var config = new LightningPaymentMethodConfig { ConnectionString = connectionString };
-        store.SetPaymentMethodConfig(paymentMethodId, JToken.FromObject(config));
-        var blob = store.GetStoreBlob();
-        blob.SetExcluded(paymentMethodId, false);
-        store.SetStoreBlob(blob);
-        await storeRepository.UpdateStore(store);
-        return Ok(new { storeId, paymentMethodId = paymentMethodId.ToString() });
     }
 }

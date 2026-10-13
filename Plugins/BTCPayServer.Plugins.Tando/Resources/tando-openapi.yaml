@@ -5,6 +5,12 @@ info:
     Merchant onboarding, subscriptions, products, employees, and BTC/M-Pesa split
     payments for the Tando BTCPay Server plugin. All routes are Greenfield-style
     endpoints under `/plugins/api/tando`, authenticated with a BTCPay API key.
+
+    Two kinds of key call this API. The Tando backend holds a server-admin key
+    and uses it for subscriptions, signup, issuing app keys, and reporting the
+    M-Pesa side of a split. It is never a member of merchant stores. Each owner
+    and employee gets their own key (returned by signup or `/users/api-keys`),
+    which the mobile app uses for everything under `/stores/{storeId}`.
   version: "0.1.0"
 servers:
   - url: https://{host}/plugins/api/tando
@@ -37,7 +43,7 @@ paths:
         designated plan is currently valid. Existing subscriber -> Active reflects
         their own subscription standing, independent of whether it still matches
         the currently-designated plan.
-      security: [{ ApiKey: [CanModifyStoreSettingsUnscoped] }]
+      security: [{ ApiKey: [CanModifyServerSettings] }]
       parameters:
         - name: phoneNumber
           in: query
@@ -57,7 +63,7 @@ paths:
     get:
       tags: [Subscription]
       summary: List active plans on the designated subscription offering
-      security: [{ ApiKey: [CanModifyStoreSettingsUnscoped] }]
+      security: [{ ApiKey: [CanModifyServerSettings] }]
       responses:
         "200":
           description: Plan list (empty/configured=false if nothing is designated yet)
@@ -76,12 +82,17 @@ paths:
       tags: [Onboarding]
       summary: Merchant signup - creates/reuses a free trial subscription and provisions a store
       description: >
-        Idempotent by phone number: if a store already exists for this MSISDN it
-        is reused (AlreadyExisted=true) rather than duplicated. Auto-enrolls a new
-        subscriber into a free trial of the operator-designated plan if the phone
-        number has no active subscription yet. Also provisions the Keypad and Cart
-        POS apps on the store.
-      security: [{ ApiKey: [CanModifyStoreSettingsUnscoped] }]
+        Called by the Tando backend after it has verified the phone number.
+        Creates (or reuses) a BTCPay user for the merchant and makes that user
+        the store's only Owner; the backend key is not added to the store.
+        Returns a new API key for the merchant's app on every call.
+
+        Idempotent by phone number: if the merchant already owns a store for this
+        MSISDN it is reused (AlreadyExisted=true) rather than duplicated. Auto-enrolls
+        a new subscriber into a free trial of the operator-designated plan if the
+        phone number has no active subscription yet. Also provisions the Keypad and
+        Cart POS apps on the store.
+      security: [{ ApiKey: [CanModifyServerSettings] }]
       requestBody:
         required: true
         content:
@@ -89,14 +100,53 @@ paths:
             schema: { $ref: "#/components/schemas/TandoSignupRequest" }
       responses:
         "200":
-          description: Store ready (created or reused)
+          description: Store ready (created or reused), with the merchant's new API key
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TandoSignupResponse" }
         "400":
-          $ref: "#/components/responses/BadRequest"
+          description: >
+            `phone_number_required`, `invalid_phone_number`,
+            `merchant_user_creation_failed` or `store_creation_failed`
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "503":
           description: Subscription plan not configured / not usable
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /users/api-keys:
+    post:
+      tags: [Onboarding]
+      summary: Issue an app key to an existing owner or employee
+      description: >
+        Login for anyone who already has access to a store: an owner on a new
+        phone, or an employee the owner has invited. Called by the Tando backend
+        after it has verified the phone number. Returns a new API key plus the
+        stores the user belongs to and their role on each, so the app can choose
+        between the owner and point-of-sale screens.
+      security: [{ ApiKey: [CanModifyServerSettings] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TandoIssueAppKeyRequest" }
+      responses:
+        "200":
+          description: Key issued
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/TandoIssueAppKeyResponse" }
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`no_store_access`: no user for this phone, or the user belongs to no store"
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -106,9 +156,11 @@ paths:
       tags: [Onboarding]
       summary: Attach a Lightning node connection string to the store
       description: >
-        Merchant/operator supplies an existing LN node connection string; this
-        does not provision or generate a node/seed itself.
-      security: [{ ApiKey: [CanModifyStoreSettingsUnscoped] }]
+        Attaches Lightning to the store, either from an existing connection
+        string or by provisioning one through a supported provider (phoenixd or
+        NWC). Called with the merchant's own key; a store the caller is not a
+        member of is rejected by BTCPay with 403.
+      security: [{ ApiKey: [CanModifyStoreSettings] }]
       parameters:
         - $ref: "#/components/parameters/StoreId"
       requestBody:
@@ -127,9 +179,12 @@ paths:
                   storeId: { type: string }
                   paymentMethodId: { type: string, example: "BTC-LN" }
         "400":
-          $ref: "#/components/responses/BadRequest"
-        "404":
-          $ref: "#/components/responses/NotFound"
+          description: "`connection_string_required`, `unsupported_provider_type`, or a provisioning error"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
 
   /stores/{storeId}/products:
     get:
@@ -257,7 +312,10 @@ paths:
       responses:
         "200": { description: Saved }
         "400":
-          description: Invalid percentage, or no M-Pesa destination set yet
+          description: >
+            `invalid_percentage`, `mpesa_destination_required`, or
+            `treasury_not_configured` (a percentage above 0 while the Tando team
+            hasn't set a treasury Lightning address)
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -279,7 +337,7 @@ paths:
             application/json:
               schema: { $ref: "#/components/schemas/TandoSplitRecord" }
         "404":
-          description: Invoice not found for this store, or split not recorded yet
+          description: "`split_not_recorded`: no split has been recorded for this invoice yet"
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -287,12 +345,18 @@ paths:
       tags: [Split Payments]
       summary: Compute and record the split breakdown for an invoice
       description: >
+        Only a settled invoice can be split. Splits are also recorded
+        automatically when an invoice settles and the store's percentage is above
+        0, so this call is mainly for stores at 0% or for retrying.
+
+        The split is taken from the amount actually paid, capped at the invoice
+        price: an invoice marked settled without payment splits nothing, and an
+        overpayment stays on the BTC side.
+
         Idempotent - if a breakdown is already recorded for this invoice, that
         existing record is returned as-is rather than recomputed, so a later
         change to the store's split config never retroactively alters a past
-        sale's breakdown. The customer's BTC payment itself is untouched; this
-        only records how it should be divided (manual-confirmation model, no
-        live M-Pesa payout call).
+        sale's breakdown.
       security: [{ ApiKey: [CanModifyStoreSettings] }]
       parameters:
         - $ref: "#/components/parameters/StoreId"
@@ -303,32 +367,94 @@ paths:
           content:
             application/json:
               schema: { $ref: "#/components/schemas/TandoSplitRecord" }
-        "404":
-          description: Invoice not found for this store
+        "400":
+          description: >
+            `invoice_not_settled` (only a settled invoice can be split) or
+            `treasury_not_configured` (the store has a percentage above 0 but no
+            treasury Lightning address is set)
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /stores/{storeId}/splits:
+    get:
+      tags: [Split Payments]
+      summary: List the recorded splits for the store, newest first
+      security: [{ ApiKey: [CanModifyStoreSettings] }]
+      parameters:
+        - $ref: "#/components/parameters/StoreId"
+        - name: skip
+          in: query
+          schema: { type: integer, default: 0 }
+        - name: take
+          in: query
+          schema: { type: integer, default: 50 }
+      responses:
+        "200":
+          description: Recorded splits (invoices without a split are not listed)
+          content:
+            application/json:
+              schema:
+                type: array
+                items: { $ref: "#/components/schemas/TandoSplitRecord" }
 
   /stores/{storeId}/invoices/{invoiceId}/split/settle:
     put:
       tags: [Split Payments]
       summary: Mark the M-Pesa leg of a split as manually settled
       description: >
-        Merchant has paid out the M-Pesa portion themselves (no automated payout
-        call from Tando) and confirms it here. Idempotent once already settled.
-      security: [{ ApiKey: [CanModifyStoreSettings] }]
+        Operator only. Called by the Tando backend once the M-Pesa portion has
+        been paid out. A merchant key gets 403: merchants can't mark their own
+        payout as done. Idempotent once already settled.
+      security: [{ ApiKey: [CanModifyServerSettings] }]
       parameters:
         - $ref: "#/components/parameters/StoreId"
         - $ref: "#/components/parameters/InvoiceId"
       responses:
         "200": { description: Marked settled }
         "400":
-          description: Split not recorded yet for this invoice
+          description: "`split_not_recorded`: no split recorded for this invoice yet"
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
         "404":
-          description: Invoice not found for this store
+          description: "`invoice_not_found`: no such invoice on this store"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+
+  /stores/{storeId}/invoices/{invoiceId}/split/mpesa-payout-status:
+    put:
+      tags: [Split Payments]
+      summary: Report the status of the M-Pesa payout for a split
+      description: >
+        Operator only. Called by the Tando backend (or its PSP callback) as the
+        M-Pesa payout progresses. `Confirmed` also marks the split's M-Pesa leg
+        settled. A merchant key gets 403.
+      security: [{ ApiKey: [CanModifyServerSettings] }]
+      parameters:
+        - $ref: "#/components/parameters/StoreId"
+        - $ref: "#/components/parameters/InvoiceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/TandoUpdateMpesaPayoutStatusRequest" }
+      responses:
+        "200": { description: Status recorded }
+        "400":
+          description: "`split_not_recorded`: no split recorded for this invoice yet"
+          content:
+            application/json:
+              schema: { $ref: "#/components/schemas/ErrorResponse" }
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          description: "`invoice_not_found`: no such invoice on this store"
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -357,11 +483,11 @@ paths:
       tags: [Employees]
       summary: Invite (or re-add) an employee by phone number
       description: >
-        Creates a passwordless account (synthetic `{phone}@bitcoin.co.ke` email,
-        same pattern as merchant signup - sign-in is via phone OTP in the
-        consuming app) if one doesn't already exist, then grants BTCPay's native
+        Creates a BTCPay user for the phone number (synthetic
+        `{phone}@bitcoin.co.ke` email with a random password nobody uses, same as
+        merchant signup) if one doesn't already exist, then grants BTCPay's native
         Employee store role - POS/invoice access, no store settings or wallet
-        access.
+        access. The employee then gets their own key from `/users/api-keys`.
       security: [{ ApiKey: [CanModifyStoreSettings] }]
       parameters:
         - $ref: "#/components/parameters/StoreId"
@@ -383,7 +509,10 @@ paths:
     delete:
       tags: [Employees]
       summary: Revoke an employee's access to the store
-      description: Refuses to remove the store's last remaining owner.
+      description: >
+        Only users with the Employee role can be revoked here; owners and
+        unknown users are refused. If the employee no longer belongs to any
+        store, the app keys issued to them are deleted too.
       security: [{ ApiKey: [CanModifyStoreSettings] }]
       parameters:
         - $ref: "#/components/parameters/StoreId"
@@ -394,7 +523,7 @@ paths:
       responses:
         "200": { description: Access revoked }
         "400":
-          description: User not found on this store, or is the last owner
+          description: "`cannot_remove_last_owner_or_user_not_found`: not an employee of this store"
           content:
             application/json:
               schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -407,10 +536,13 @@ components:
       name: Authorization
       description: >
         BTCPay Greenfield API key, sent as `Authorization: token <api-key>`.
-        Required permission depends on the endpoint: subscription/signup
-        endpoints need an unscoped `btcpay.store.canmodifystoresettings`
-        (CanModifyStoreSettingsUnscoped) key; all `/stores/{storeId}/...`
-        endpoints need that permission scoped to the specific store.
+        Subscription, signup, `/users/api-keys`, `split/settle` and
+        `split/mpesa-payout-status` need `btcpay.server.canmodifyserversettings`
+        (the Tando backend's key). The other `/stores/{storeId}/...` endpoints
+        need `btcpay.store.canmodifystoresettings` from a user who belongs to
+        that store (the merchant's or employee's own key, as issued by signup or
+        `/users/api-keys`). BTCPay answers 403 when the caller isn't a member of
+        the store, which includes a store or invoice id that doesn't exist.
 
   parameters:
     StoreId:
@@ -427,6 +559,14 @@ components:
   responses:
     BadRequest:
       description: Validation error
+      content:
+        application/json:
+          schema: { $ref: "#/components/schemas/ErrorResponse" }
+    Forbidden:
+      description: >
+        The key lacks the required permission, or the caller is not a member of
+        the store (BTCPay also answers 403 for an unknown store or invoice id
+        on store-scoped routes)
       content:
         application/json:
           schema: { $ref: "#/components/schemas/ErrorResponse" }
@@ -466,21 +606,61 @@ components:
       required: [phoneNumber]
       properties:
         phoneNumber: { type: string, example: "0712345678" }
+        deviceName:
+          type: string
+          nullable: true
+          description: Label for the issued key, so the merchant can tell their devices apart.
 
     TandoSignupResponse:
       type: object
       properties:
         storeId: { type: string }
+        userId: { type: string, description: The merchant's BTCPay user id }
         phoneNumber: { type: string }
         alreadyExisted: { type: boolean }
+        apiKey: { type: string, description: "The merchant's own API key, for their app. Never stored by Tando." }
         posAppId: { type: string, nullable: true }
         cartAppId: { type: string, nullable: true }
 
+    TandoIssueAppKeyRequest:
+      type: object
+      required: [phoneNumber]
+      properties:
+        phoneNumber: { type: string, example: "0712345678" }
+        deviceName: { type: string, nullable: true }
+
+    TandoIssueAppKeyResponse:
+      type: object
+      properties:
+        userId: { type: string }
+        phoneNumber: { type: string }
+        apiKey: { type: string }
+        stores:
+          type: array
+          items: { $ref: "#/components/schemas/TandoStoreAccess" }
+
+    TandoStoreAccess:
+      type: object
+      properties:
+        storeId: { type: string }
+        storeName: { type: string }
+        role: { type: string, nullable: true, example: "Owner", description: "Owner or Employee" }
+
     TandoConnectLightningRequest:
       type: object
-      required: [connectionString]
+      description: Send either `connectionString` or `lightningProvision`.
       properties:
-        connectionString: { type: string, example: "type=clightning;server=unix://...;" }
+        connectionString: { type: string, nullable: true, example: "type=clightning;server=unix://...;" }
+        lightningProvision: { $ref: "#/components/schemas/TandoLightningProvisionRequest" }
+
+    TandoLightningProvisionRequest:
+      type: object
+      nullable: true
+      properties:
+        providerType: { type: string, enum: [Phoenixd, Nwc] }
+        phoenixdServerUrl: { type: string, nullable: true }
+        phoenixdApiPassword: { type: string, nullable: true }
+        nwcConnectionUri: { type: string, nullable: true }
 
     TandoCreateProductRequest:
       type: object
@@ -536,7 +716,8 @@ components:
     TandoSplitRecord:
       type: object
       properties:
-        totalAmount: { type: number, format: decimal }
+        totalAmount: { type: number, format: decimal, description: The invoice price }
+        paidAmount: { type: number, format: decimal, description: "What the customer actually paid. The split is taken from this, capped at totalAmount." }
         currency: { type: string, example: "KES" }
         btcPortionAmount: { type: number, format: decimal }
         mpesaPortionAmount: { type: number, format: decimal }
@@ -546,6 +727,24 @@ components:
         mpesaSettled: { type: boolean }
         mpesaSettledAt: { type: string, format: date-time, nullable: true }
         recordedAt: { type: string, format: date-time }
+        pullPaymentId: { type: string, nullable: true }
+        pullPaymentStatus: { type: string, enum: [NotApplicable, Created, Claimed, Failed] }
+        pullPaymentError: { type: string, nullable: true }
+        mpesaPayoutStatus: { $ref: "#/components/schemas/TandoMpesaPayoutStatus" }
+        mpesaPayoutReference: { type: string, nullable: true }
+        mpesaPayoutError: { type: string, nullable: true }
+
+    TandoMpesaPayoutStatus:
+      type: string
+      enum: [NotTriggered, Triggered, Confirmed, Failed]
+
+    TandoUpdateMpesaPayoutStatusRequest:
+      type: object
+      required: [status]
+      properties:
+        status: { $ref: "#/components/schemas/TandoMpesaPayoutStatus" }
+        payoutReference: { type: string, nullable: true }
+        error: { type: string, nullable: true }
 
     TandoInviteEmployeeRequest:
       type: object

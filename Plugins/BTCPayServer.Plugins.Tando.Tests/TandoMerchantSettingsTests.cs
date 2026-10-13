@@ -25,7 +25,7 @@ public class TandoMerchantSettingsTests : PlaywrightBaseTest
 
     public ServerTester ServerTester { get; }
 
-    private async Task EnsureTandoSubscriptionConfigured(TestAccount admin)
+    private async Task EnsureTandoSubscriptionConfigured(TestAccount admin, string treasuryLightningAddress = "treasury@tando.example")
     {
         var client = await admin.CreateClient();
         var offering = await client.CreateOffering(admin.StoreId, new OfferingModel { AppName = "Tando Test Offering" });
@@ -34,7 +34,8 @@ public class TandoMerchantSettingsTests : PlaywrightBaseTest
         await subscriptionService.SaveSettings(new TandoSettings
         {
             SubscriptionOfferingId = offering.Id,
-            SubscriptionPlanId = plan.Id
+            SubscriptionPlanId = plan.Id,
+            TreasuryLightningAddress = treasuryLightningAddress
         });
     }
 
@@ -65,7 +66,13 @@ public class TandoMerchantSettingsTests : PlaywrightBaseTest
         var createResult = await manageController.AddApiKey(new UIManageController.AddApiKeyViewModel
         {
             Label = label,
-            PermissionValues = new List<UIManageController.AddApiKeyViewModel.PermissionValueItem> { permissionValue }
+            PermissionValues = storeId is null
+                ? new List<UIManageController.AddApiKeyViewModel.PermissionValueItem>
+                {
+                    permissionValue,
+                    new() { Permission = Policies.CanModifyServerSettings, Value = true }
+                }
+                : new List<UIManageController.AddApiKeyViewModel.PermissionValueItem> { permissionValue }
         });
         Assert.IsType<RedirectToActionResult>(createResult);
 
@@ -94,14 +101,21 @@ public class TandoMerchantSettingsTests : PlaywrightBaseTest
     private static async Task<JsonElement> ParseJson(IAPIResponse response)
         => JsonDocument.Parse(await response.TextAsync()).RootElement;
 
-    private async Task<string> SignupAndGetStoreId(IAPIRequestContext api)
+    private readonly Dictionary<string, string> _merchantKeys = new();
+
+    private async Task<(string StoreId, IAPIRequestContext Api)> SignupMerchant(IAPIRequestContext backendApi, string phone = null)
     {
-        var response = await api.PostAsync("/plugins/api/tando/signup",
-            new APIRequestContextOptions { DataObject = new { phoneNumber = RandomKenyanPhone() } });
+        var response = await backendApi.PostAsync("/plugins/api/tando/signup",
+            new APIRequestContextOptions { DataObject = new { phoneNumber = phone ?? RandomKenyanPhone() } });
         var body = await response.TextAsync();
         Assert.True(response.Ok, $"Signup failed ({response.Status}): {body}");
-        return JsonDocument.Parse(body).RootElement.GetProperty("storeId").GetString();
+        var root = JsonDocument.Parse(body).RootElement;
+        var storeId = root.GetProperty("storeId").GetString();
+        var apiKey = root.GetProperty("apiKey").GetString();
+        _merchantKeys[storeId] = apiKey;
+        return (storeId, await ApiContextFor(apiKey));
     }
+
 
     [Fact]
     public async Task GetMpesaSettings_WhenNotConfigured_Returns404()
@@ -111,9 +125,9 @@ public class TandoMerchantSettingsTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-        var storeId = await SignupAndGetStoreId(api);
+        var (storeId, merchantApi) = await SignupMerchant(api);
 
-        var get = await api.GetAsync($"/plugins/api/tando/stores/{storeId}/mpesa");
+        var get = await merchantApi.GetAsync($"/plugins/api/tando/stores/{storeId}/mpesa");
         Assert.Equal(404, get.Status);
         var body = await ParseJson(get);
         Assert.Equal("not_configured", body.GetProperty("error").GetString());
@@ -127,23 +141,23 @@ public class TandoMerchantSettingsTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-        var storeId = await SignupAndGetStoreId(api);
+        var (storeId, merchantApi) = await SignupMerchant(api);
 
-        var save = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/mpesa",
+        var save = await merchantApi.PutAsync($"/plugins/api/tando/stores/{storeId}/mpesa",
             new APIRequestContextOptions
             {
                 DataObject = new { destinationType = "MobileNumber", destination = RandomKenyanPhone(), accountNumber = (string)null }
             });
         Assert.Equal(200, save.Status);
 
-        var get = await api.GetAsync($"/plugins/api/tando/stores/{storeId}/mpesa");
+        var get = await merchantApi.GetAsync($"/plugins/api/tando/stores/{storeId}/mpesa");
         Assert.Equal(200, get.Status);
         var body = await ParseJson(get);
         Assert.Equal("MobileNumber", body.GetProperty("destinationType").GetString());
     }
 
     [Fact]
-    public async Task SaveMpesaSettings_UnknownStore_Returns404()
+    public async Task SaveMpesaSettings_UnknownStore_ReturnsForbidden()
     {
         await InitializePlaywright(ServerTester);
         var admin = await NewAdminAccount();
@@ -156,9 +170,7 @@ public class TandoMerchantSettingsTests : PlaywrightBaseTest
             {
                 DataObject = new { destinationType = "MobileNumber", destination = RandomKenyanPhone() }
             });
-        Assert.Equal(404, save.Status);
-        var body = await ParseJson(save);
-        Assert.Equal("store_not_found", body.GetProperty("error").GetString());
+        Assert.Equal(403, save.Status);
     }
 
     [Fact]
@@ -169,9 +181,9 @@ public class TandoMerchantSettingsTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-        var storeId = await SignupAndGetStoreId(api);
+        var (storeId, merchantApi) = await SignupMerchant(api);
 
-        var get = await api.GetAsync($"/plugins/api/tando/stores/{storeId}/split-config");
+        var get = await merchantApi.GetAsync($"/plugins/api/tando/stores/{storeId}/split-config");
         Assert.Equal(200, get.Status);
         var body = await ParseJson(get);
         Assert.Equal(0m, body.GetProperty("mpesaPercentage").GetDecimal());
@@ -185,9 +197,9 @@ public class TandoMerchantSettingsTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-        var storeId = await SignupAndGetStoreId(api);
+        var (storeId, merchantApi) = await SignupMerchant(api);
 
-        var save = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/split-config",
+        var save = await merchantApi.PutAsync($"/plugins/api/tando/stores/{storeId}/split-config",
             new APIRequestContextOptions { DataObject = new { mpesaPercentage = 25 } });
 
         Assert.Equal(400, save.Status);
@@ -203,19 +215,19 @@ public class TandoMerchantSettingsTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-        var storeId = await SignupAndGetStoreId(api);
+        var (storeId, merchantApi) = await SignupMerchant(api);
 
-        await api.PutAsync($"/plugins/api/tando/stores/{storeId}/mpesa",
+        await merchantApi.PutAsync($"/plugins/api/tando/stores/{storeId}/mpesa",
             new APIRequestContextOptions
             {
                 DataObject = new { destinationType = "MobileNumber", destination = RandomKenyanPhone() }
             });
 
-        var save = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/split-config",
+        var save = await merchantApi.PutAsync($"/plugins/api/tando/stores/{storeId}/split-config",
             new APIRequestContextOptions { DataObject = new { mpesaPercentage = 25 } });
         Assert.Equal(200, save.Status);
 
-        var get = await api.GetAsync($"/plugins/api/tando/stores/{storeId}/split-config");
+        var get = await merchantApi.GetAsync($"/plugins/api/tando/stores/{storeId}/split-config");
         var body = await ParseJson(get);
         Assert.Equal(25m, body.GetProperty("mpesaPercentage").GetDecimal());
     }
@@ -228,11 +240,45 @@ public class TandoMerchantSettingsTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-        var storeId = await SignupAndGetStoreId(api);
+        var (storeId, merchantApi) = await SignupMerchant(api);
 
-        var save = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/split-config",
+        var save = await merchantApi.PutAsync($"/plugins/api/tando/stores/{storeId}/split-config",
             new APIRequestContextOptions { DataObject = new { mpesaPercentage = 150 } });
 
         Assert.Equal(400, save.Status);
+    }
+
+    [Fact]
+    public async Task SaveSplitConfig_AboveZero_WithoutTreasury_ReturnsBadRequest()
+    {
+        await InitializePlaywright(ServerTester);
+        var admin = await NewAdminAccount();
+        await EnsureTandoSubscriptionConfigured(admin, treasuryLightningAddress: null);
+        var adminKey = await MintApiKey(admin);
+        var api = await ApiContextFor(adminKey);
+        var (storeId, merchantApi) = await SignupMerchant(api);
+
+        await merchantApi.PutAsync($"/plugins/api/tando/stores/{storeId}/mpesa",
+            new APIRequestContextOptions { DataObject = new { destinationType = "MobileNumber", destination = RandomKenyanPhone() } });
+
+        var save = await merchantApi.PutAsync($"/plugins/api/tando/stores/{storeId}/split-config",
+            new APIRequestContextOptions { DataObject = new { mpesaPercentage = 25 } });
+        Assert.Equal(400, save.Status);
+        Assert.Equal("treasury_not_configured", (await ParseJson(save)).GetProperty("error").GetString());
+    }
+
+    [Fact]
+    public async Task SaveSplitConfig_ZeroPercent_WithoutTreasury_Succeeds()
+    {
+        await InitializePlaywright(ServerTester);
+        var admin = await NewAdminAccount();
+        await EnsureTandoSubscriptionConfigured(admin, treasuryLightningAddress: null);
+        var adminKey = await MintApiKey(admin);
+        var api = await ApiContextFor(adminKey);
+        var (storeId, merchantApi) = await SignupMerchant(api);
+
+        var save = await merchantApi.PutAsync($"/plugins/api/tando/stores/{storeId}/split-config",
+            new APIRequestContextOptions { DataObject = new { mpesaPercentage = 0 } });
+        Assert.Equal(200, save.Status);
     }
 }

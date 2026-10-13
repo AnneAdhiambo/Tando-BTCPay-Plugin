@@ -4,18 +4,25 @@ using System.Linq;
 using System.Threading;
 using System.Threading.Tasks;
 using BTCPayServer.Client.Models;
+using BTCPayServer.Data;
 using BTCPayServer.Data.Payouts.LightningLike;
 using BTCPayServer.HostedServices;
 using BTCPayServer.Payouts;
 using BTCPayServer.Plugins.Tando.ViewModels;
 using BTCPayServer.Services.Invoices;
 using BTCPayServer.Services.Stores;
-using NBitpayClient;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Converters;
+using Newtonsoft.Json.Linq;
+using Microsoft.EntityFrameworkCore;
+using Dapper;
 
 namespace BTCPayServer.Plugins.Tando.Services;
 
+[JsonConverter(typeof(StringEnumConverter))]
 public enum TandoPullPaymentStatus { NotApplicable, Created, Claimed, Failed }
 
+[JsonConverter(typeof(StringEnumConverter))]
 public enum TandoMpesaPayoutStatus { NotTriggered, Triggered, Confirmed, Failed }
 public record TandoUpdateMpesaPayoutStatusRequest(TandoMpesaPayoutStatus Status, string? PayoutReference, string? Error);
 
@@ -24,6 +31,7 @@ public record TandoSplitRecord
     public decimal TotalAmount { get; set; }
     public string Currency { get; set; } = "";
     public decimal BtcPortionAmount { get; set; }
+    public decimal PaidAmount { get; set; }
     public decimal MpesaPortionAmount { get; set; }
     public decimal MpesaPercentage { get; set; }
     public TandoMpesaDestinationType? MpesaDestinationType { get; set; }
@@ -42,7 +50,7 @@ public record TandoSplitRecord
 
 public class TandoSplitService(InvoiceRepository invoiceRepository, TandoSubscriptionService subscriptionService,
     StoreRepository storeRepository, TandoMerchantSettingsService merchantSettingsService, ITandoMpesaPayoutClient tandoMpesaPayoutClient,
-    PullPaymentHostedService pullPaymentHostedService)
+    PullPaymentHostedService pullPaymentHostedService, ApplicationDbContextFactory dbContextFactory)
 {
     private const string SplitMetadataKey = "tandoSplit";
 
@@ -75,11 +83,17 @@ public class TandoSplitService(InvoiceRepository invoiceRepository, TandoSubscri
             return (null, "invoice_not_settled");
 
         var splitConfig = await merchantSettingsService.GetSplitConfig(storeId);
+        if (splitConfig.MpesaPercentage > 0 && !(await subscriptionService.GetSettings()).IsTreasuryConfigured)
+            return (null, "treasury_not_configured");
         var mpesaSettings = await merchantSettingsService.GetMpesaSettings(storeId);
-        var mpesaPortion = Math.Round(invoice.Price * (splitConfig.MpesaPercentage / 100m), 2);
+
+        var paidAmount = Math.Max(0m, invoice.PaidAmount?.Net ?? 0m);
+        var splitBase = Math.Min(paidAmount, invoice.Price);
+        var mpesaPortion = Math.Round(splitBase * (splitConfig.MpesaPercentage / 100m), 2);
         var record = new TandoSplitRecord
         {
             TotalAmount = invoice.Price,
+            PaidAmount = paidAmount,
             Currency = invoice.Currency,
             MpesaPortionAmount = mpesaPortion,
             BtcPortionAmount = invoice.Price - mpesaPortion,
@@ -124,22 +138,37 @@ public class TandoSplitService(InvoiceRepository invoiceRepository, TandoSubscri
         return (true, null);
     }
 
-    // This doesnt necessarily return all splits, but only those that have been recorded in the invoice metadata. This is intentional, as we only want to return splits that have been computed and recorded.
+    public const int MaxListTake = 200;
+
+    /// <summary>
+    /// Recorded splits for the store, newest first. Postgres filters to invoices that carry a split, orders and pages them,
+    /// and only the split JSON comes back, so the cost follows the page size rather than the store's invoice count.
+    /// </summary>
     public async Task<IReadOnlyList<TandoSplitRecord>> ListSplits(string storeId, int skip, int take)
     {
-        var invoices = await invoiceRepository.GetInvoices(new InvoiceQuery
-        {
-            StoreId = new[] { storeId },
-            IncludeArchived = false
-        });
+        skip = Math.Max(0, skip);
+        take = Math.Clamp(take, 1, MaxListTake);
 
-        return invoices
-            .Select(GetRecord)
+        await using var ctx = dbContextFactory.CreateContext();
+        // The WHERE and ORDER BY expressions match IX_Invoices_TandoSplit (see TandoSplitIndexHostedService) so it can be used.
+        // RecordedAt is sorted as text: every record is written with DateTimeOffset.UtcNow, so all values share the +00:00
+        // offset and text order is time order.
+        var rows = await ctx.Database.GetDbConnection().QueryAsync<string>(
+            """
+            SELECT "Blob2"->'metadata'->>'tandoSplit'
+            FROM "Invoices"
+            WHERE "StoreDataId" = @storeId
+              AND ("Blob2"->'metadata'->'tandoSplit') IS NOT NULL
+              AND NOT "Archived"
+            ORDER BY ("Blob2"->'metadata'->'tandoSplit'->>'RecordedAt') DESC, "Id"
+            OFFSET @skip LIMIT @take
+            """,
+            new { storeId, skip, take });
+
+        return rows
+            .Select(json => JsonConvert.DeserializeObject<TandoSplitRecord>(json))
             .Where(r => r is not null)
             .Cast<TandoSplitRecord>()
-            .OrderByDescending(r => r.RecordedAt)
-            .Skip(skip)
-            .Take(take)
             .ToList();
     }
 
@@ -170,8 +199,16 @@ public class TandoSplitService(InvoiceRepository invoiceRepository, TandoSubscri
     private async Task<TandoSplitRecord> CreateAndClaimPayout(string storeId, string invoiceId, TandoSplitRecord record)
     {
         var settings = await subscriptionService.GetSettings();
-        if (string.IsNullOrWhiteSpace(settings.TreasuryLightningAddress))
+        if (!settings.IsTreasuryConfigured)
             return record;
+
+        if (settings.MaxPayoutAmount is { } maxPayout && record.MpesaPortionAmount > maxPayout)
+        {
+            record.PullPaymentStatus = TandoPullPaymentStatus.Failed;
+            record.PullPaymentError = "payout_limit_exceeded";
+            await invoiceRepository.UpdateInvoiceMetadata(invoiceId, SplitMetadataKey, record);
+            return record;
+        }
 
         var store = await storeRepository.FindStore(storeId);
         if (store is null)
@@ -252,5 +289,7 @@ public class TandoSplitService(InvoiceRepository invoiceRepository, TandoSubscri
         return record;
     }
 
-    private static TandoSplitRecord? GetRecord(InvoiceEntity invoice) => invoice.Metadata?.GetAdditionalData<TandoSplitRecord>(SplitMetadataKey);
+    private static TandoSplitRecord? GetRecord(InvoiceEntity invoice) =>
+        invoice.Metadata?.AdditionalData is { } data && data.TryGetValue(SplitMetadataKey, out var token)
+        && token.Type == JTokenType.Object ? token.ToObject<TandoSplitRecord>() : null;
 }

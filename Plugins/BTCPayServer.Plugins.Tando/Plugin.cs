@@ -23,8 +23,10 @@ public class Plugin : BaseBTCPayServerPlugin
         services.AddSingleton<IUIExtension>(new UIExtension("TandoServerNav", "server-nav"));
         services.AddScoped<TandoSplitService>();
         services.AddSingleton<TandoSubscriptionService>();
+        services.AddScoped<TandoMerchantAccountService>();
         services.AddScoped<TandoMerchantSettingsService>();
         services.AddScoped<TandoProductProvisioningService>();
+        services.AddHostedService<TandoSplitIndexHostedService>();
         services.AddHostedService<TandoPlanFallbackHostedService>();
         services.AddSingleton<TandoLightningProvisionerFactory>();
         services.AddSingleton<ITandoLightningProvisioner, NwcLightningProvisioner>();

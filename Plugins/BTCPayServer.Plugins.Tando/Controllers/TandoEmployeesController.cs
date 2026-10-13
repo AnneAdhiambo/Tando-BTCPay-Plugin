@@ -1,14 +1,12 @@
-using System;
 using System.Linq;
 using System.Threading.Tasks;
 using BTCPayServer.Abstractions.Constants;
 using BTCPayServer.Client;
-using BTCPayServer.Data;
 using BTCPayServer.Plugins.Tando.Helper;
+using BTCPayServer.Plugins.Tando.Services;
 using BTCPayServer.Plugins.Tando.ViewModels;
 using BTCPayServer.Services.Stores;
 using Microsoft.AspNetCore.Authorization;
-using Microsoft.AspNetCore.Identity;
 using Microsoft.AspNetCore.Mvc;
 using static BTCPayServer.Services.Stores.StoreRepository;
 
@@ -17,7 +15,7 @@ namespace BTCPayServer.Plugins.Tando;
 [Route("~/plugins/api/tando/stores/{storeId}/employees")]
 [Authorize(Policy = Policies.CanModifyStoreSettings, AuthenticationSchemes = AuthenticationSchemes.Greenfield)]
 [IgnoreAntiforgeryToken]
-public class TandoEmployeesController(StoreRepository storeRepository, UserManager<ApplicationUser> userManager) : Controller
+public class TandoEmployeesController(StoreRepository storeRepository, TandoMerchantAccountService accountService) : Controller
 {
     [HttpGet]
     public async Task<IActionResult> List(string storeId)
@@ -38,28 +36,9 @@ public class TandoEmployeesController(StoreRepository storeRepository, UserManag
         if (normalizedPhone is null)
             return BadRequest(new { error = "invalid_phone_number", detail = $"Expected a Kenyan MSISDN, e.g. {KenyanPhoneNumber.ExampleFormat}." });
 
-        var syntheticEmail = $"{normalizedPhone}@bitcoin.co.ke";
-        var user = await userManager.FindByEmailAsync(syntheticEmail);
-        var alreadyExisted = user is not null;
+        var (user, alreadyExisted, errors) = await accountService.GetOrCreateUser(normalizedPhone);
         if (user is null)
-        {
-            user = new ApplicationUser
-            {
-                UserName = syntheticEmail,
-                Email = syntheticEmail,
-                RequiresEmailConfirmation = false,
-                RequiresApproval = false,
-                Approved = true,
-                Created = DateTimeOffset.UtcNow
-            };
-            var blob = user.GetBlob() ?? new UserBlob();
-            blob.Name = normalizedPhone;
-            user.SetBlob(blob);
-
-            var identityResult = await userManager.CreateAsync(user);
-            if (!identityResult.Succeeded)
-                return BadRequest(new { error = "employee_creation_failed", detail = identityResult.Errors.Select(e => e.Description) });
-        }
+            return BadRequest(new { error = "employee_creation_failed", detail = errors });
 
         var result = await storeRepository.AddOrUpdateStoreUser(storeId, user.Id, StoreRoleId.Employee);
         if (result is not AddOrUpdateStoreUserResult.Success)
@@ -76,9 +55,16 @@ public class TandoEmployeesController(StoreRepository storeRepository, UserManag
     [HttpDelete("{userId}")]
     public async Task<IActionResult> Revoke(string storeId, string userId)
     {
+        var employees = await storeRepository.GetStoreUsers(storeId, new[] { StoreRoleId.Employee });
+        if (employees.All(u => u.Id != userId))
+            return BadRequest(new { error = "cannot_remove_last_owner_or_user_not_found" });
+
         var removed = await storeRepository.RemoveStoreUser(storeId, userId);
         if (!removed)
             return BadRequest(new { error = "cannot_remove_last_owner_or_user_not_found" });
+
+        if ((await storeRepository.GetStoresByUserId(userId)).Length == 0)
+            await accountService.RevokeAppKeys(userId);
 
         return Ok();
     }

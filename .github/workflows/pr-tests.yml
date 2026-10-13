@@ -54,7 +54,10 @@ jobs:
           docker compose up -d dev
 
       - name: Run integration tests
-        run: dotnet test Plugins/BTCPayServer.Plugins.Tando.Tests --filter "Integration=Integration" --logger "trx;LogFileName=integration-tests.trx" --results-directory /tmp/TestResults
+        run: dotnet test Plugins/BTCPayServer.Plugins.Tando.Tests --filter "Category=Integration" --logger "trx;LogFileName=integration-tests.trx" --results-directory /tmp/TestResults/integration
+
+      - name: Fail if no tests ran
+        run: bash .github/scripts/assert-tests-ran.sh /tmp/TestResults/integration
 
       - name: Upload test results
         if: always()
@@ -97,8 +100,11 @@ jobs:
           PLAYWRIGHT_PS1=$(find Plugins/BTCPayServer.Plugins.Tando.Tests/bin -name "playwright.ps1" | head -n 1)
           pwsh "$PLAYWRIGHT_PS1" install --with-deps chromium
 
-      - name: Run Playwright tests (both batches)
-        run: dotnet test Plugins/BTCPayServer.Plugins.Tando.Tests --filter "Playwright=Playwright|Playwright=Playwright-2" --logger "trx;LogFileName=playwright-tests.trx" --results-directory /tmp/TestResults
+      - name: Run Playwright tests
+        run: dotnet test Plugins/BTCPayServer.Plugins.Tando.Tests --no-build --filter "Category=PlaywrightUITest" --logger "trx;LogFileName=playwright-tests.trx" --results-directory /tmp/TestResults/playwright
+
+      - name: Fail if no tests ran
+        run: bash .github/scripts/assert-tests-ran.sh /tmp/TestResults/playwright
 
       - name: Upload test results
         if: always()

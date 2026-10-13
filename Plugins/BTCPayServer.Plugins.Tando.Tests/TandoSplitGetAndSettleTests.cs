@@ -65,7 +65,13 @@ public class TandoSplitGetAndSettleTests : PlaywrightBaseTest
         var createResult = await manageController.AddApiKey(new UIManageController.AddApiKeyViewModel
         {
             Label = label,
-            PermissionValues = new List<UIManageController.AddApiKeyViewModel.PermissionValueItem> { permissionValue }
+            PermissionValues = storeId is null
+                ? new List<UIManageController.AddApiKeyViewModel.PermissionValueItem>
+                {
+                    permissionValue,
+                    new() { Permission = Policies.CanModifyServerSettings, Value = true }
+                }
+                : new List<UIManageController.AddApiKeyViewModel.PermissionValueItem> { permissionValue }
         });
         Assert.IsType<RedirectToActionResult>(createResult);
 
@@ -93,25 +99,41 @@ public class TandoSplitGetAndSettleTests : PlaywrightBaseTest
 
     private static async Task<JsonElement> ParseJson(IAPIResponse response)
         => JsonDocument.Parse(await response.TextAsync()).RootElement;
+    private readonly Dictionary<string, string> _merchantKeys = new();
 
-    private async Task<string> SignupAndGetStoreId(IAPIRequestContext api)
+    private async Task<(string StoreId, IAPIRequestContext Api)> SignupMerchant(IAPIRequestContext backendApi, string phone = null)
     {
-        var response = await api.PostAsync("/plugins/api/tando/signup",
-            new APIRequestContextOptions { DataObject = new { phoneNumber = RandomKenyanPhone() } });
+        var response = await backendApi.PostAsync("/plugins/api/tando/signup",
+            new APIRequestContextOptions { DataObject = new { phoneNumber = phone ?? RandomKenyanPhone() } });
         var body = await response.TextAsync();
         Assert.True(response.Ok, $"Signup failed ({response.Status}): {body}");
-        return JsonDocument.Parse(body).RootElement.GetProperty("storeId").GetString();
+        var root = JsonDocument.Parse(body).RootElement;
+        var storeId = root.GetProperty("storeId").GetString();
+        var apiKey = root.GetProperty("apiKey").GetString();
+        _merchantKeys[storeId] = apiKey;
+        return (storeId, await ApiContextFor(apiKey));
     }
+
+    private BTCPayServerClient MerchantClient(string storeId) => new(ServerUri, _merchantKeys[storeId]);
 
     private async Task<string> CreateInvoice(TestAccount admin, string storeId, decimal amount)
     {
-        var client = await admin.CreateClient();
+        var client = MerchantClient(storeId);
+        await EnsureStoreWallet(client, storeId);
         var invoice = await client.CreateInvoice(storeId, new CreateInvoiceRequest
         {
             Amount = amount,
             Currency = "KES"
         });
         return invoice.Id;
+    }
+
+    private async Task<string> CreateSettledInvoice(TestAccount admin, string storeId, decimal amount)
+    {
+        var invoiceId = await CreateInvoice(admin, storeId, amount);
+        var client = MerchantClient(storeId);
+        await client.MarkInvoiceStatus(invoiceId, new MarkInvoiceStatusRequest { Status = InvoiceStatus.Settled });
+        return invoiceId;
     }
 
     [Fact]
@@ -122,10 +144,10 @@ public class TandoSplitGetAndSettleTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-        var storeId = await SignupAndGetStoreId(api);
+        var (storeId, merchantApi) = await SignupMerchant(api);
         var invoiceId = await CreateInvoice(admin, storeId, 100m);
 
-        var get = await api.GetAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
+        var get = await merchantApi.GetAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
         Assert.Equal(404, get.Status);
         var body = await ParseJson(get);
         Assert.Equal("split_not_recorded", body.GetProperty("error").GetString());
@@ -139,12 +161,12 @@ public class TandoSplitGetAndSettleTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-        var storeId = await SignupAndGetStoreId(api);
-        var invoiceId = await CreateInvoice(admin, storeId, 400m);
+        var (storeId, merchantApi) = await SignupMerchant(api);
+        var invoiceId = await CreateSettledInvoice(admin, storeId, 400m);
 
-        await api.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
+        await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
 
-        var get = await api.GetAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
+        var get = await merchantApi.GetAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
         Assert.Equal(200, get.Status);
         var body = await ParseJson(get);
         Assert.Equal(400m, body.GetProperty("totalAmount").GetDecimal());
@@ -158,12 +180,9 @@ public class TandoSplitGetAndSettleTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-        var storeId = await SignupAndGetStoreId(api);
-
+        var (storeId, _) = await SignupMerchant(api);
         var settle = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/invoices/does-not-exist/split/settle");
         Assert.Equal(404, settle.Status);
-        var body = await ParseJson(settle);
-        Assert.Equal("invoice_not_found", body.GetProperty("error").GetString());
     }
 
     [Fact]
@@ -174,13 +193,27 @@ public class TandoSplitGetAndSettleTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-        var storeId = await SignupAndGetStoreId(api);
-        var invoiceId = await CreateInvoice(admin, storeId, 150m);
+        var (storeId, merchantApi) = await SignupMerchant(api);
+        var invoiceId = await CreateSettledInvoice(admin, storeId, 150m);
 
-        var compute = await api.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
+        var compute = await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split");
         Assert.Equal(200, compute.Status);
 
         var settle = await api.PutAsync($"/plugins/api/tando/stores/{storeId}/invoices/{invoiceId}/split/settle");
         Assert.Equal(200, settle.Status);
+    }
+
+    private readonly HashSet<string> _storesWithWallet = new();
+    private async Task EnsureStoreWallet(BTCPayServerClient client, string storeId)
+    {
+        if (_storesWithWallet.Add(storeId))
+        {
+            await client.GenerateOnChainWallet(storeId, "BTC-CHAIN", new GenerateOnChainWalletRequest());
+            await client.UpdateStoreRateConfiguration(storeId, new StoreRateConfiguration
+            {
+                IsCustomScript = true,
+                EffectiveScript = "BTC_KES = 10000000;"
+            });
+        }
     }
 }

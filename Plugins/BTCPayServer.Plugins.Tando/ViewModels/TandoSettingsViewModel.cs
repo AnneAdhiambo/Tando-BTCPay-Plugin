@@ -3,6 +3,8 @@ using System.Collections.Generic;
 using System.ComponentModel.DataAnnotations;
 using BTCPayServer.Plugins.Tando.Services;
 using Microsoft.AspNetCore.Mvc.Rendering;
+using Newtonsoft.Json;
+using Newtonsoft.Json.Converters;
 
 namespace BTCPayServer.Plugins.Tando.ViewModels;
 
@@ -12,6 +14,7 @@ public class TandoSettingsViewModel
     public string? SubscriptionPlanId { get; set; }
     public string? FallbackSubscriptionPlanId { get; set; }
     public string? TreasuryLightningAddress { get; set; }
+    public decimal? MaxPayoutAmount { get; set; }
     public List<SelectListItem> Offerings { get; set; } = new();
     public List<SelectListItem> Plans { get; set; } = new();
     public string? CreateOfferingUrl { get; set; }
@@ -23,6 +26,8 @@ public class TandoSettings
     public string? SubscriptionPlanId { get; set; }
     public string? FallbackSubscriptionPlanId { get; set; }
     public string? TreasuryLightningAddress { get; set; }
+    public decimal? MaxPayoutAmount { get; set; }
+    public bool IsTreasuryConfigured => !string.IsNullOrWhiteSpace(TreasuryLightningAddress);
 }
 
 public class TandoConnectLightningRequest
@@ -31,6 +36,7 @@ public class TandoConnectLightningRequest
     public TandoLightningProvisionRequest LightningProvision { get; set; }
 }
 
+[JsonConverter(typeof(StringEnumConverter))]
 public enum TandoMpesaDestinationType { MobileNumber, TillNumber, PayBill }
 
 public class TandoMpesaSettingsRequest

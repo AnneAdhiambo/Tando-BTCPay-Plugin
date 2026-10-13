@@ -77,7 +77,13 @@ public class TandoSecurityTests : PlaywrightBaseTest
         var createResult = await manageController.AddApiKey(new UIManageController.AddApiKeyViewModel
         {
             Label = label,
-            PermissionValues = new List<UIManageController.AddApiKeyViewModel.PermissionValueItem> { permissionValue }
+            PermissionValues = storeId is null
+                ? new List<UIManageController.AddApiKeyViewModel.PermissionValueItem>
+                {
+                    permissionValue,
+                    new() { Permission = Policies.CanModifyServerSettings, Value = true }
+                }
+                : new List<UIManageController.AddApiKeyViewModel.PermissionValueItem> { permissionValue }
         });
         Assert.IsType<RedirectToActionResult>(createResult);
 
@@ -109,14 +115,22 @@ public class TandoSecurityTests : PlaywrightBaseTest
     private static async Task<JsonElement> ParseJson(IAPIResponse response)
         => JsonDocument.Parse(await response.TextAsync()).RootElement;
 
-    private async Task<string> SignupAndGetStoreId(IAPIRequestContext api)
+    private readonly Dictionary<string, string> _merchantKeys = new();
+
+    private async Task<(string StoreId, IAPIRequestContext Api)> SignupMerchant(IAPIRequestContext backendApi, string phone = null)
     {
-        var response = await api.PostAsync("/plugins/api/tando/signup",
-            new APIRequestContextOptions { DataObject = new { phoneNumber = RandomKenyanPhone() } });
+        var response = await backendApi.PostAsync("/plugins/api/tando/signup",
+            new APIRequestContextOptions { DataObject = new { phoneNumber = phone ?? RandomKenyanPhone() } });
         var body = await response.TextAsync();
         Assert.True(response.Ok, $"Signup failed ({response.Status}): {body}");
-        return JsonDocument.Parse(body).RootElement.GetProperty("storeId").GetString();
+        var root = JsonDocument.Parse(body).RootElement;
+        var storeId = root.GetProperty("storeId").GetString();
+        var apiKey = root.GetProperty("apiKey").GetString();
+        _merchantKeys[storeId] = apiKey;
+        return (storeId, await ApiContextFor(apiKey));
     }
+
+    private BTCPayServerClient MerchantClient(string storeId) => new(ServerUri, _merchantKeys[storeId]);
 
     [Fact]
     public async Task TandoSignup_ThenAddProduct_RoundTrips()
@@ -126,44 +140,70 @@ public class TandoSecurityTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
+        var (storeId, merchantApi) = await SignupMerchant(api);
 
-        var storeId = await SignupAndGetStoreId(api);
-
-        var create = await api.PostAsync($"/plugins/api/tando/stores/{storeId}/products",
+        var create = await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/products",
             new APIRequestContextOptions { DataObject = new { name = "Chapati", price = 20 } });
         Assert.Equal(200, create.Status);
         var productId = (await ParseJson(create)).GetProperty("id").GetString();
 
-        var list = await api.GetAsync($"/plugins/api/tando/stores/{storeId}/products");
+        var list = await merchantApi.GetAsync($"/plugins/api/tando/stores/{storeId}/products");
         var products = await ParseJson(list);
         Assert.Contains(products.EnumerateArray(), p => p.GetProperty("id").GetString() == productId);
-
         await api.DisposeAsync();
+        await merchantApi.DisposeAsync();
     }
 
     [Fact]
-    public async Task ScopedApiKey_CannotAccessAnotherStoresProducts()
+    public async Task MerchantKey_CannotAccessAnotherMerchantsStore()
     {
         await InitializePlaywright(ServerTester);
         var admin = await NewAdminAccount();
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
-        var adminApi = await ApiContextFor(adminKey);
+        var backendApi = await ApiContextFor(adminKey);
 
-        var storeAId = await SignupAndGetStoreId(adminApi);
-        var storeBId = await SignupAndGetStoreId(adminApi);
+        var (storeAId, merchantAApi) = await SignupMerchant(backendApi);
+        var (storeBId, merchantBApi) = await SignupMerchant(backendApi);
 
-        var scopedKey = await MintApiKey(admin, storeAId);
-        var scopedApi = await ApiContextFor(scopedKey);
-
-        var ownStore = await scopedApi.GetAsync($"/plugins/api/tando/stores/{storeAId}/products");
+        var ownStore = await merchantAApi.GetAsync($"/plugins/api/tando/stores/{storeAId}/products");
         Assert.Equal(200, ownStore.Status);
 
-        var otherStore = await scopedApi.GetAsync($"/plugins/api/tando/stores/{storeBId}/products");
-        Assert.True(otherStore.Status is 401 or 403,
-            $"Expected 401/403 accessing another store's products with a key scoped to a different store, got {otherStore.Status}.");
+        var otherStore = await merchantAApi.GetAsync($"/plugins/api/tando/stores/{storeBId}/products");
+        Assert.Equal(403, otherStore.Status);
 
-        await adminApi.DisposeAsync();
-        await scopedApi.DisposeAsync();
+        await backendApi.DisposeAsync();
+        await merchantAApi.DisposeAsync();
+        await merchantBApi.DisposeAsync();
+    }
+
+    [Fact]
+    public async Task BackendKey_IsNotAMemberOfMerchantStores()
+    {
+        await InitializePlaywright(ServerTester);
+        var admin = await NewAdminAccount();
+        await EnsureTandoSubscriptionConfigured(admin);
+        var adminKey = await MintApiKey(admin);
+        var backendApi = await ApiContextFor(adminKey);
+        var (storeId, _) = await SignupMerchant(backendApi);
+
+        var create = await backendApi.PostAsync($"/plugins/api/tando/stores/{storeId}/products",
+            new APIRequestContextOptions { DataObject = new { name = "Chapati", price = 20 } });
+        Assert.Equal(403, create.Status);
+    }
+
+    [Fact]
+    public async Task MerchantKey_CannotReportItsOwnMpesaPayout()
+    {
+        await InitializePlaywright(ServerTester);
+        var admin = await NewAdminAccount();
+        await EnsureTandoSubscriptionConfigured(admin);
+        var adminKey = await MintApiKey(admin);
+        var backendApi = await ApiContextFor(adminKey);
+        var (storeId, merchantApi) = await SignupMerchant(backendApi);
+
+        var update = await merchantApi.PutAsync($"/plugins/api/tando/stores/{storeId}/invoices/any/split/mpesa-payout-status",
+            new APIRequestContextOptions { DataObject = new { status = "Confirmed", payoutReference = "FAKE" } });
+        Assert.Equal(403, update.Status);
     }
 }

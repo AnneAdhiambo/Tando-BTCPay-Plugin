@@ -12,6 +12,7 @@ using Newtonsoft.Json;
 
 namespace BTCPayServer.Plugins.Tando.Tests;
 
+[Trait("Category", "Integration")]
 public class TandoLightningConnectTests : UnitTestBase
 {
     public TandoLightningConnectTests(ITestOutputHelper helper) : base(helper)
@@ -54,7 +55,7 @@ public class TandoLightningConnectTests : UnitTestBase
 
         const string connectionString = "type=clightning;server=tcp://127.0.0.1:9735";
         using (var missingStoreResponse = await Connect(unscopedKey, "missing-store", connectionString))
-            Assert.Equal(HttpStatusCode.NotFound, missingStoreResponse.StatusCode);
+            Assert.Equal(HttpStatusCode.Forbidden, missingStoreResponse.StatusCode);
 
         using (var validResponse = await Connect(unscopedKey, user.StoreId, connectionString))
             Assert.Equal(HttpStatusCode.OK, validResponse.StatusCode);

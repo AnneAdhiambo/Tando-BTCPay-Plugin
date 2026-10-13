@@ -2,6 +2,7 @@
 using BTCPayServer.Client;
 using BTCPayServer.Client.Models;
 using BTCPayServer.Controllers;
+using BTCPayServer.Plugins.Tando.Helper;
 using BTCPayServer.Plugins.Tando.Services;
 using BTCPayServer.Plugins.Tando.ViewModels;
 using BTCPayServer.Tests;
@@ -67,7 +68,13 @@ public class TandoEmployeesTests : PlaywrightBaseTest
         var createResult = await manageController.AddApiKey(new UIManageController.AddApiKeyViewModel
         {
             Label = label,
-            PermissionValues = new List<UIManageController.AddApiKeyViewModel.PermissionValueItem> { permissionValue }
+            PermissionValues = storeId is null
+                ? new List<UIManageController.AddApiKeyViewModel.PermissionValueItem>
+                {
+                    permissionValue,
+                    new() { Permission = Policies.CanModifyServerSettings, Value = true }
+                }
+                : new List<UIManageController.AddApiKeyViewModel.PermissionValueItem> { permissionValue }
         });
         Assert.IsType<RedirectToActionResult>(createResult);
 
@@ -96,16 +103,21 @@ public class TandoEmployeesTests : PlaywrightBaseTest
     private static async Task<JsonElement> ParseJson(IAPIResponse response)
         => JsonDocument.Parse(await response.TextAsync()).RootElement;
 
-    private async Task<string> SignupAndGetStoreId(IAPIRequestContext api)
+    private readonly Dictionary<string, string> _merchantKeys = new();
+
+    private async Task<(string StoreId, IAPIRequestContext Api)> SignupMerchant(IAPIRequestContext backendApi, string phone = null)
     {
-        var response = await api.PostAsync("/plugins/api/tando/signup",
-            new APIRequestContextOptions { DataObject = new { phoneNumber = RandomKenyanPhone() } });
+        var response = await backendApi.PostAsync("/plugins/api/tando/signup",
+            new APIRequestContextOptions { DataObject = new { phoneNumber = phone ?? RandomKenyanPhone() } });
         var body = await response.TextAsync();
         Assert.True(response.Ok, $"Signup failed ({response.Status}): {body}");
-        return JsonDocument.Parse(body).RootElement.GetProperty("storeId").GetString();
+        var root = JsonDocument.Parse(body).RootElement;
+        var storeId = root.GetProperty("storeId").GetString();
+        var apiKey = root.GetProperty("apiKey").GetString();
+        _merchantKeys[storeId] = apiKey;
+        return (storeId, await ApiContextFor(apiKey));
     }
 
-    // --- Tests ---
 
     [Fact]
     public async Task Invite_WithValidPhone_CreatesEmployeeAndAssignsRole()
@@ -115,10 +127,10 @@ public class TandoEmployeesTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-        var storeId = await SignupAndGetStoreId(api);
+        var (storeId, merchantApi) = await SignupMerchant(api);
 
         var phone = RandomKenyanPhone();
-        var invite = await api.PostAsync($"/plugins/api/tando/stores/{storeId}/employees",
+        var invite = await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/employees",
             new APIRequestContextOptions { DataObject = new { phoneNumber = phone } });
 
         Assert.Equal(200, invite.Status);
@@ -135,9 +147,9 @@ public class TandoEmployeesTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-        var storeId = await SignupAndGetStoreId(api);
+        var (storeId, merchantApi) = await SignupMerchant(api);
 
-        var invite = await api.PostAsync($"/plugins/api/tando/stores/{storeId}/employees",
+        var invite = await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/employees",
             new APIRequestContextOptions { DataObject = new { phoneNumber = "not-a-phone-number" } });
 
         Assert.Equal(400, invite.Status);
@@ -153,16 +165,16 @@ public class TandoEmployeesTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-        var storeId = await SignupAndGetStoreId(api);
+        var (storeId, merchantApi) = await SignupMerchant(api);
         var phone = RandomKenyanPhone();
 
-        var first = await api.PostAsync($"/plugins/api/tando/stores/{storeId}/employees",
+        var first = await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/employees",
             new APIRequestContextOptions { DataObject = new { phoneNumber = phone } });
         Assert.Equal(200, first.Status);
         var firstBody = await ParseJson(first);
         Assert.False(firstBody.GetProperty("alreadyExisted").GetBoolean());
 
-        var second = await api.PostAsync($"/plugins/api/tando/stores/{storeId}/employees",
+        var second = await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/employees",
             new APIRequestContextOptions { DataObject = new { phoneNumber = phone } });
         Assert.Equal(200, second.Status);
         var secondBody = await ParseJson(second);
@@ -178,22 +190,22 @@ public class TandoEmployeesTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-        var storeId = await SignupAndGetStoreId(api);
+        var (storeId, merchantApi) = await SignupMerchant(api);
 
         var phoneA = RandomKenyanPhone();
         var phoneB = RandomKenyanPhone();
-        await api.PostAsync($"/plugins/api/tando/stores/{storeId}/employees",
+        await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/employees",
             new APIRequestContextOptions { DataObject = new { phoneNumber = phoneA } });
-        await api.PostAsync($"/plugins/api/tando/stores/{storeId}/employees",
+        await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/employees",
             new APIRequestContextOptions { DataObject = new { phoneNumber = phoneB } });
 
-        var list = await api.GetAsync($"/plugins/api/tando/stores/{storeId}/employees");
+        var list = await merchantApi.GetAsync($"/plugins/api/tando/stores/{storeId}/employees");
         Assert.Equal(200, list.Status);
         var records = await ParseJson(list);
 
         var phones = records.EnumerateArray().Select(r => r.GetProperty("phoneNumber").GetString()).ToList();
-        Assert.Contains(phoneA, phones);
-        Assert.Contains(phoneB, phones);
+        Assert.Contains(KenyanPhoneNumber.Normalize(phoneA), phones);
+        Assert.Contains(KenyanPhoneNumber.Normalize(phoneB), phones);
     }
 
     [Fact]
@@ -204,17 +216,17 @@ public class TandoEmployeesTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-        var storeId = await SignupAndGetStoreId(api);
+        var (storeId, merchantApi) = await SignupMerchant(api);
 
         var phone = RandomKenyanPhone();
-        var invite = await api.PostAsync($"/plugins/api/tando/stores/{storeId}/employees",
+        var invite = await merchantApi.PostAsync($"/plugins/api/tando/stores/{storeId}/employees",
             new APIRequestContextOptions { DataObject = new { phoneNumber = phone } });
         var userId = (await ParseJson(invite)).GetProperty("userId").GetString();
 
-        var revoke = await api.DeleteAsync($"/plugins/api/tando/stores/{storeId}/employees/{userId}");
+        var revoke = await merchantApi.DeleteAsync($"/plugins/api/tando/stores/{storeId}/employees/{userId}");
         Assert.Equal(200, revoke.Status);
 
-        var list = await api.GetAsync($"/plugins/api/tando/stores/{storeId}/employees");
+        var list = await merchantApi.GetAsync($"/plugins/api/tando/stores/{storeId}/employees");
         var records = await ParseJson(list);
         var userIds = records.EnumerateArray().Select(r => r.GetProperty("userId").GetString()).ToList();
         Assert.DoesNotContain(userId, userIds);
@@ -228,9 +240,9 @@ public class TandoEmployeesTests : PlaywrightBaseTest
         await EnsureTandoSubscriptionConfigured(admin);
         var adminKey = await MintApiKey(admin);
         var api = await ApiContextFor(adminKey);
-        var storeId = await SignupAndGetStoreId(api);
+        var (storeId, merchantApi) = await SignupMerchant(api);
 
-        var revoke = await api.DeleteAsync($"/plugins/api/tando/stores/{storeId}/employees/does-not-exist");
+        var revoke = await merchantApi.DeleteAsync($"/plugins/api/tando/stores/{storeId}/employees/does-not-exist");
         Assert.Equal(400, revoke.Status);
         var body = await ParseJson(revoke);
         Assert.Equal("cannot_remove_last_owner_or_user_not_found", body.GetProperty("error").GetString());

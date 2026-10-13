@@ -57,11 +57,36 @@
                 {
                     <div class="alert alert-warning" role="alert" text-translate="true">The selected offering has no active plans yet. Add a plan to continue.</div>
                 }
-
+                <h4 class="mt-5 mb-3" text-translate="true">Treasury</h4>
+                @if (string.IsNullOrWhiteSpace(Model.TreasuryLightningAddress))
+                {
+                    <div class="alert alert-warning" role="alert" text-translate="true">
+                        Split payments are off. Merchants can't set an M-Pesa percentage above 0% and no M-Pesa payouts are made
+                        until a treasury Lightning address is set here.
+                    </div>
+                }
+                else
+                {
+                    <div class="alert alert-success" role="alert" text-translate="true">
+                        Split payments are on. The M-Pesa portion of each split is sent to the treasury address below.
+                    </div>
+                }
                 <div class="form-group mb-3">
                     <label asp-for="TreasuryLightningAddress" class="form-label" text-translate="true">Treasury Lightning address</label>
                     <input asp-for="TreasuryLightningAddress" class="form-control" placeholder="payouts@yourdomain.com" />
                     <span asp-validation-for="TreasuryLightningAddress" class="text-danger"></span>
+                    <div class="form-text" text-translate="true">
+                        Receives the M-Pesa portion of each sale in sats, before Tando pays the merchant in KES. Leave empty to turn split payments off.
+                    </div>
+                </div>
+                <div class="form-group mb-3">
+                    <label asp-for="MaxPayoutAmount" class="form-label" text-translate="true">Maximum payout per sale (KES)</label>
+                    <input asp-for="MaxPayoutAmount" type="number" min="0" step="0.01" class="form-control" />
+                    <span asp-validation-for="MaxPayoutAmount" class="text-danger"></span>
+                    <div class="form-text" text-translate="true">
+                        A split whose M-Pesa portion is above this is recorded but not paid out, so the Tando team can review it.
+                        Leave empty for no limit.
+                    </div>
                 </div>
 
                 <button id="page-primary" type="submit" class="btn btn-primary" text-translate="true">Save</button>

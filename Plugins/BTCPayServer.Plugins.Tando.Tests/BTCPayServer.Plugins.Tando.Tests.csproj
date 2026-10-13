@@ -12,6 +12,7 @@
 	<ItemGroup>
 		<PackageReference Include="coverlet.collector" Version="6.0.4" />
 		<PackageReference Include="Microsoft.Playwright" Version="1.62.0" />
+		<PackageReference Include="Microsoft.NET.Test.Sdk" Version="18.8.1" />
 		<PackageReference Include="xunit.runner.visualstudio" Version="3.1.4" />
 		<PackageReference Include="xunit.v3" Version="3.2.2" />
 	</ItemGroup>
@@ -36,4 +37,13 @@
 		<ProjectReference Include="..\BTCPayServer.Plugins.Tando\BTCPayServer.Plugins.Tando.csproj" />
 	</ItemGroup>
 
+	<Target Name="WriteTandoDebugPlugins" AfterTargets="Build">
+		<PropertyGroup>
+			<TandoPluginDll>$([System.IO.Path]::GetFullPath('$(OutDir)BTCPayServer.Plugins.Tando.dll').Replace('\', '/'))</TandoPluginDll>
+		</PropertyGroup>
+		<WriteLinesToFile File="$(OutDir)appsettings.dev.json"
+		                  Lines="{&quot;DEBUG_PLUGINS&quot;:&quot;$(TandoPluginDll)&quot;}"
+		                  Overwrite="true" />
+	</Target>
+	
 </Project>
